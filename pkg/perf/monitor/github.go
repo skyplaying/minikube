@@ -22,13 +22,13 @@ import (
 	"os"
 	"time"
 
-	"github.com/google/go-github/v36/github"
+	"github.com/google/go-github/v68/github"
 	"github.com/pkg/errors"
 	"golang.org/x/oauth2"
 )
 
 // Client provides the context and client with necessary auth
-// for interacting with the Github API
+// for interacting with the GitHub API
 type Client struct {
 	ctx context.Context
 	*github.Client
@@ -134,7 +134,7 @@ func (g *Client) timeOfLastCommit(pr int) (time.Time, error) {
 	lastCommitTime := time.Time{}
 	for _, c := range commits {
 		if newCommitTime := c.GetCommit().GetAuthor().GetDate(); newCommitTime.After(lastCommitTime) {
-			lastCommitTime = newCommitTime
+			lastCommitTime = *newCommitTime.GetTime()
 		}
 	}
 	return lastCommitTime, nil
@@ -169,7 +169,8 @@ func (g *Client) timeOfLastComment(pr int, login string) (time.Time, error) {
 		if u := c.GetUser(); u != nil {
 			if u.GetLogin() == login {
 				if c.GetCreatedAt().After(lastCommentTime) {
-					lastCommentTime = c.GetCreatedAt()
+					createdAt := c.GetCreatedAt()
+					lastCommentTime = *createdAt.GetTime()
 				}
 			}
 		}
