@@ -48,6 +48,11 @@ var exclude = []string{
 	"    - {{.profile}}",
 	"test/integration",
 	"pkg/minikube/reason/exitcodes.go",
+	"{{.err}}",
+	"{{.extra_option_component_name}}.{{.key}}={{.value}}",
+	"{{ .name }}: {{ .rejection }}",
+	"127.0.0.1",
+	"- {{.logPath}}",
 }
 
 // ErrMapFile is a constant to refer to the err_map file, which contains the Advice strings.
@@ -129,7 +134,7 @@ func TranslatableStrings(paths []string, functions []string, output string) erro
 		f := e.fs.Pop().(funcType)
 		e.currentFunc = f
 		for _, root := range paths {
-			err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			err := filepath.Walk(root, func(path string, _ os.FileInfo, _ error) error {
 				if shouldCheckFile(path) {
 					e.filename = path
 					return inspectFile(e)
@@ -350,6 +355,12 @@ func checkString(s string) string {
 		}
 	}
 
+	// Remove unnecessary backslashes
+	if s[0] == '"' {
+		r := strings.NewReplacer(`\\`, "\\", `\a`, "\a", `\b`, "\b", `\f`, "\f", `\n`, "\n", `\r`, "\r", `\t`, "\t", `\v`, "\v", `\"`, "\"")
+		stringToTranslate = r.Replace(stringToTranslate)
+	}
+
 	// Hooray, we can translate the string!
 	return stringToTranslate
 }
@@ -488,6 +499,7 @@ func writeStringsToFiles(e *state, output string) error {
 		if err != nil {
 			return errors.Wrap(err, "marshalling translations")
 		}
+		c = append(c, '\n')
 		err = os.WriteFile(path, c, info.Mode())
 		if err != nil {
 			return errors.Wrap(err, "writing translation file")

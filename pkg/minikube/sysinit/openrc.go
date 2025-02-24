@@ -38,7 +38,7 @@ readonly UNIT_PATH=$1
 
 while true; do
   if [[ -f "${UNIT_PATH}" ]]; then
-	eval $(egrep "^ExecStart=" "${UNIT_PATH}" | cut -d"=" -f2-)
+	eval $(grep -E "^ExecStart=" "${UNIT_PATH}" | cut -d"=" -f2-)
   fi
   sleep 1
 done
@@ -108,12 +108,15 @@ func (s *OpenRC) Start(svc string) error {
 	defer cb()
 
 	rr, err := s.r.RunCmd(exec.CommandContext(ctx, "sudo", "service", svc, "start"))
+	if err != nil {
+		return err
+	}
 	klog.Infof("start output: %s", rr.Output())
-	return err
+	return nil
 }
 
 // Disable does nothing
-func (s *OpenRC) Disable(svc string) error {
+func (s *OpenRC) Disable(_ string) error {
 	return nil
 }
 
@@ -125,12 +128,12 @@ func (s *OpenRC) DisableNow(svc string) error {
 }
 
 // Mask does nothing
-func (s *OpenRC) Mask(svc string) error {
+func (s *OpenRC) Mask(_ string) error {
 	return nil
 }
 
 // Enable does nothing
-func (s *OpenRC) Enable(svc string) error {
+func (s *OpenRC) Enable(_ string) error {
 	return nil
 }
 
@@ -142,28 +145,34 @@ func (s *OpenRC) EnableNow(svc string) error {
 }
 
 // Unmask does nothing
-func (s *OpenRC) Unmask(svc string) error {
+func (s *OpenRC) Unmask(_ string) error {
 	return nil
 }
 
 // Restart restarts a service
 func (s *OpenRC) Restart(svc string) error {
 	rr, err := s.r.RunCmd(exec.Command("sudo", "service", svc, "restart"))
+	if err != nil {
+		return err
+	}
 	klog.Infof("restart output: %s", rr.Output())
-	return err
+	return nil
 }
 
 // Reload reloads a service
 // currently only used by our docker-env that doesn't need openrc implementation
-func (s *OpenRC) Reload(svc string) error {
+func (s *OpenRC) Reload(_ string) error {
 	return fmt.Errorf("reload is not implemented for OpenRC yet ! Please implement if needed")
 }
 
 // Stop stops a service
 func (s *OpenRC) Stop(svc string) error {
 	rr, err := s.r.RunCmd(exec.Command("sudo", "service", svc, "stop"))
+	if err != nil {
+		return err
+	}
 	klog.Infof("stop output: %s", rr.Output())
-	return err
+	return nil
 }
 
 // ForceStop stops a service with prejuidice
