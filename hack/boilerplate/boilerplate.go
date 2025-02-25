@@ -34,7 +34,7 @@ var (
 	skippedPaths   = regexp.MustCompile(`Godeps|third_party|_gopath|_output|\.git|cluster/env.sh|vendor|test/e2e/generated/bindata.go|site/themes/docsy|test/integration/testdata`)
 	windowdNewLine = regexp.MustCompile(`\r`)
 	txtExtension   = regexp.MustCompile(`\.txt`)
-	goBuildTag     = regexp.MustCompile(`(?m)^(//go:build.*\n// \+build.*\n)+\n`)
+	goBuildTag     = regexp.MustCompile(`(?m)^(//go:build.*\n)+\n`)
 	shebang        = regexp.MustCompile(`(?m)^(#!.*\n)\n*`)
 	copyright      = regexp.MustCompile(`Copyright YEAR`)
 	copyrightReal  = regexp.MustCompile(`Copyright \d{4}`)
@@ -135,7 +135,7 @@ func filePasses(filename string, expectedBoilerplate []byte) (bool, error) {
 // filesToCheck returns the list of the filers that will be checked for the boilerplate.
 func filesToCheck(rootDir string, extensions map[string][]byte) ([]string, error) {
 	var outFiles []string
-	err := filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(rootDir, func(path string, info os.FileInfo, _ error) error {
 		// remove current workdir from the beginning of the path in case it matches the skipped path
 		cwd, _ := os.Getwd()
 		// replace "\" with "\\" for windows style path

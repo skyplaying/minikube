@@ -1,5 +1,4 @@
 //go:build linux
-// +build linux
 
 /*
 Copyright 2016 The Kubernetes Authors All rights reserved.
@@ -25,14 +24,14 @@ import (
 	"text/template"
 
 	"github.com/docker/machine/libmachine/log"
-	"github.com/libvirt/libvirt-go"
 	"github.com/pkg/errors"
+	"libvirt.org/go/libvirt"
 )
 
 func (d *Driver) getDomain() (*libvirt.Domain, *libvirt.Connect, error) {
 	conn, err := getConnection(d.ConnectionURI)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "getting domain")
+		return nil, nil, errors.Wrap(err, "getting libvirt connection")
 	}
 
 	dom, err := conn.LookupDomainByName(d.MachineName)
@@ -46,7 +45,7 @@ func (d *Driver) getDomain() (*libvirt.Domain, *libvirt.Connect, error) {
 func getConnection(connectionURI string) (*libvirt.Connect, error) {
 	conn, err := libvirt.NewConnect(connectionURI)
 	if err != nil {
-		return nil, errors.Wrap(err, "error connecting to libvirt socket.")
+		return nil, errors.Wrap(err, "connecting to libvirt socket")
 	}
 
 	return conn, nil
@@ -72,9 +71,13 @@ func (d *Driver) createDomain() (*libvirt.Domain, error) {
 	}
 	conn, err := getConnection(d.ConnectionURI)
 	if err != nil {
-		return nil, errors.Wrap(err, "error getting libvirt connection")
+		return nil, errors.Wrap(err, "getting libvirt connection")
 	}
-	defer conn.Close()
+	defer func() {
+		if _, err := conn.Close(); err != nil {
+			log.Errorf("unable to close libvirt connection: %v", err)
+		}
+	}()
 
 	log.Infof("define libvirt domain using xml: %v", domainXML.String())
 	// define the domain in libvirt using the generated XML

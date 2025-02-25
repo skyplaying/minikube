@@ -25,11 +25,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"cloud.google.com/go/storage"
 	"google.golang.org/api/option"
-	"k8s.io/minikube/pkg/minikube/detect"
 
 	"github.com/pkg/errors"
 	"github.com/spf13/viper"
@@ -44,7 +44,7 @@ const (
 	// PreloadVersion is the current version of the preloaded tarball
 	//
 	// NOTE: You may need to bump this version up when upgrading auxiliary docker images
-	PreloadVersion = "v16"
+	PreloadVersion = "v18"
 	// PreloadBucket is the name of the GCS bucket where preloaded volume tarballs exist
 	PreloadBucket = "minikube-preloaded-volume-tarballs"
 )
@@ -64,8 +64,7 @@ func TarballName(k8sVersion, containerRuntime string) string {
 	} else {
 		storageDriver = "overlay2"
 	}
-	arch := detect.EffectiveArch()
-	return fmt.Sprintf("preloaded-images-k8s-%s-%s-%s-%s-%s.tar.lz4", PreloadVersion, k8sVersion, containerRuntime, storageDriver, arch)
+	return fmt.Sprintf("preloaded-images-k8s-%s-%s-%s-%s-%s.tar.lz4", PreloadVersion, k8sVersion, containerRuntime, storageDriver, runtime.GOARCH)
 }
 
 // returns the name of the checksum file
@@ -90,7 +89,7 @@ func TarballPath(k8sVersion, containerRuntime string) string {
 
 // remoteTarballURL returns the URL for the remote tarball in GCS
 func remoteTarballURL(k8sVersion, containerRuntime string) string {
-	return fmt.Sprintf("https://%s/%s/%s", downloadHost, PreloadBucket, TarballName(k8sVersion, containerRuntime))
+	return fmt.Sprintf("https://%s/%s/%s/%s/%s", downloadHost, PreloadBucket, PreloadVersion, k8sVersion, TarballName(k8sVersion, containerRuntime))
 }
 
 func setPreloadState(k8sVersion, containerRuntime string, value bool) {
@@ -137,14 +136,13 @@ func PreloadExists(k8sVersion, containerRuntime, driverName string, forcePreload
 	}
 
 	// If the preload existence is cached, just return that value.
-	preloadState, ok := preloadStates[k8sVersion][containerRuntime]
-	if ok {
+	if preloadState, ok := preloadStates[k8sVersion][containerRuntime]; ok {
 		return preloadState
 	}
 
 	// Omit remote check if tarball exists locally
 	targetPath := TarballPath(k8sVersion, containerRuntime)
-	if _, err := checkCache(targetPath); err == nil {
+	if f, err := checkCache(targetPath); err == nil && f.Size() != 0 {
 		klog.Infof("Found local preload: %s", targetPath)
 		setPreloadState(k8sVersion, containerRuntime, true)
 		return true
@@ -170,7 +168,7 @@ func Preload(k8sVersion, containerRuntime, driverName string) error {
 		return err
 	}
 
-	if _, err := checkCache(targetPath); err == nil {
+	if f, err := checkCache(targetPath); err == nil && f.Size() != 0 {
 		klog.Infof("Found %s in cache, skipping download", targetPath)
 		return nil
 	}
@@ -236,7 +234,8 @@ func getStorageAttrs(name string) (*storage.ObjectAttrs, error) {
 // getChecksum returns the MD5 checksum of the preload tarball
 var getChecksum = func(k8sVersion, containerRuntime string) ([]byte, error) {
 	klog.Infof("getting checksum for %s ...", TarballName(k8sVersion, containerRuntime))
-	attrs, err := getStorageAttrs(TarballName(k8sVersion, containerRuntime))
+	filename := fmt.Sprintf("%s/%s/%s", PreloadVersion, k8sVersion, TarballName(k8sVersion, containerRuntime))
+	attrs, err := getStorageAttrs(filename)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +251,7 @@ func saveChecksumFile(k8sVersion, containerRuntime string, checksum []byte) erro
 // verifyChecksum returns true if the checksum of the local binary matches
 // the checksum of the remote binary
 func verifyChecksum(k8sVersion, containerRuntime, path string) error {
-	klog.Infof("verifying checksumm of %s ...", path)
+	klog.Infof("verifying checksum of %s ...", path)
 	// get md5 checksum of tarball path
 	contents, err := os.ReadFile(path)
 	if err != nil {
@@ -285,7 +284,7 @@ var ensureChecksumValid = func(k8sVersion, containerRuntime, targetPath string, 
 	return nil
 }
 
-// CleanUpOlderPreloads deletes preload files beloning to older minikube versions
+// CleanUpOlderPreloads deletes preload files belonging to older minikube versions
 // checks the current preload version and then if the saved tar file is belongs to older minikube it will delete it
 // in case of failure only logs to the user
 func CleanUpOlderPreloads() {
