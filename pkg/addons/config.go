@@ -71,13 +71,8 @@ var Addons = []*Addon{
 	{
 		name:        "gvisor",
 		set:         SetBool,
-		validations: []setFn{IsRuntimeContainerd},
+		validations: []setFn{isRuntimeContainerd},
 		callbacks:   []setFn{EnableOrDisableAddon, verifyAddonStatus},
-	},
-	{
-		name:      "helm-tiller",
-		set:       SetBool,
-		callbacks: []setFn{EnableOrDisableAddon},
 	},
 	{
 		name:      "ingress",
@@ -100,6 +95,16 @@ var Addons = []*Addon{
 		callbacks: []setFn{EnableOrDisableAddon},
 	},
 	{
+		name:      "inspektor-gadget",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon},
+	},
+	{
+		name:      "kong",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon},
+	},
+	{
 		name:      "kubevirt",
 		set:       SetBool,
 		callbacks: []setFn{EnableOrDisableAddon},
@@ -115,12 +120,20 @@ var Addons = []*Addon{
 		callbacks: []setFn{EnableOrDisableAddon, verifyAddonStatus},
 	},
 	{
-		name:      "nvidia-driver-installer",
-		set:       SetBool,
-		callbacks: []setFn{EnableOrDisableAddon},
+		name:        "nvidia-driver-installer",
+		set:         SetBool,
+		validations: []setFn{isKVMDriverForNVIDIA},
+		callbacks:   []setFn{EnableOrDisableAddon},
 	},
 	{
-		name:      "nvidia-gpu-device-plugin",
+		// The nvidia-gpu-device-plugin addon is deprecated and it's functionality is merged inside of nvidia-device-plugin addon.
+		name:        "nvidia-gpu-device-plugin",
+		set:         SetBool,
+		validations: []setFn{isKVMDriverForNVIDIA},
+		callbacks:   []setFn{EnableOrDisableAddon},
+	},
+	{
+		name:      "amd-gpu-device-plugin",
 		set:       SetBool,
 		callbacks: []setFn{EnableOrDisableAddon},
 	},
@@ -157,6 +170,11 @@ var Addons = []*Addon{
 		callbacks: []setFn{enableOrDisableStorageClasses},
 	},
 	{
+		name:      "storage-provisioner-rancher",
+		set:       SetBool,
+		callbacks: []setFn{enableOrDisableStorageClasses},
+	},
+	{
 		name:      "metallb",
 		set:       SetBool,
 		callbacks: []setFn{EnableOrDisableAddon},
@@ -177,6 +195,11 @@ var Addons = []*Addon{
 		callbacks: []setFn{enableOrDisableGCPAuth, EnableOrDisableAddon, verifyGCPAuthAddon},
 	},
 	{
+		name:      "volcano",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon},
+	},
+	{
 		name:      "volumesnapshots",
 		set:       SetBool,
 		callbacks: []setFn{EnableOrDisableAddon},
@@ -184,11 +207,41 @@ var Addons = []*Addon{
 	{
 		name:        "csi-hostpath-driver",
 		set:         SetBool,
-		validations: []setFn{IsVolumesnapshotsEnabled},
+		validations: []setFn{isVolumesnapshotsEnabled},
 		callbacks:   []setFn{EnableOrDisableAddon, verifyAddonStatus},
 	},
 	{
 		name:      "portainer",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon},
+	},
+	{
+		name:      "inaccel",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon},
+	},
+	{
+		name:      "headlamp",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon},
+	},
+	{
+		name:      "cloud-spanner",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon},
+	},
+	{
+		name:      "kubeflow",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon},
+	},
+	{
+		name:      "nvidia-device-plugin",
+		set:       SetBool,
+		callbacks: []setFn{EnableOrDisableAddon},
+	},
+	{
+		name:      "yakd",
 		set:       SetBool,
 		callbacks: []setFn{EnableOrDisableAddon},
 	},

@@ -1,17 +1,11 @@
 # See the OWNERS docs at https://go.k8s.io/owners
 
 reviewers:
-  - afbjorklund
-  - sharifelgamal
   - medyagh
-  - blueelvis
-  - prasadkatti
   - prezha
   - spowelljr
-  - klaases
+  - comradeprogrammer
 approvers:
-  - afbjorklund
-  - sharifelgamal
   - medyagh
   - spowelljr
   - prezha
@@ -24,3 +18,5 @@ emeritus_approvers:
   - priyawadhwa
   - josedonizetti
   - tstromberg
+  - sharifelgamal
+  - afbjorklund

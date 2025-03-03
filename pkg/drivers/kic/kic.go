@@ -41,7 +41,9 @@ import (
 	"k8s.io/minikube/pkg/minikube/cruntime"
 	"k8s.io/minikube/pkg/minikube/download"
 	"k8s.io/minikube/pkg/minikube/driver"
+	"k8s.io/minikube/pkg/minikube/exit"
 	"k8s.io/minikube/pkg/minikube/out"
+	"k8s.io/minikube/pkg/minikube/reason"
 	"k8s.io/minikube/pkg/minikube/style"
 	"k8s.io/minikube/pkg/minikube/sysinit"
 	"k8s.io/minikube/pkg/util/retry"
@@ -81,25 +83,38 @@ func (d *Driver) Create() error {
 		ClusterLabel:  oci.ProfileLabelKey + "=" + d.MachineName,
 		NodeLabel:     oci.NodeLabelKey + "=" + d.NodeConfig.MachineName,
 		CPUs:          strconv.Itoa(d.NodeConfig.CPU),
-		Memory:        strconv.Itoa(d.NodeConfig.Memory) + "mb",
+		Memory:        strconv.Itoa(d.NodeConfig.Memory),
 		Envs:          d.NodeConfig.Envs,
 		ExtraArgs:     append([]string{"--expose", fmt.Sprintf("%d", d.NodeConfig.APIServerPort)}, d.NodeConfig.ExtraArgs...),
 		OCIBinary:     d.NodeConfig.OCIBinary,
 		APIServerPort: d.NodeConfig.APIServerPort,
+		GPUs:          d.NodeConfig.GPUs,
+	}
+	if params.Memory != "0" {
+		params.Memory += "mb"
 	}
 
 	networkName := d.NodeConfig.Network
 	if networkName == "" {
 		networkName = d.NodeConfig.ClusterName
 	}
-	if gateway, err := oci.CreateNetwork(d.OCIBinary, networkName); err != nil {
-		out.WarningT("Unable to create dedicated network, this might result in cluster IP change after restart: {{.error}}", out.V{"error": err})
+	staticIP := d.NodeConfig.StaticIP
+	if gateway, err := oci.CreateNetwork(d.OCIBinary, networkName, d.NodeConfig.Subnet, staticIP); err != nil {
+		msg := "Unable to create dedicated network, this might result in cluster IP change after restart: {{.error}}"
+		args := out.V{"error": err}
+		if staticIP != "" {
+			exit.Message(reason.IfDedicatedNetwork, msg, args)
+		}
+		out.WarningT(msg, args)
+	} else if gateway != nil && staticIP != "" {
+		params.Network = networkName
+		params.IP = staticIP
 	} else if gateway != nil {
 		params.Network = networkName
 		ip := gateway.To4()
 		// calculate the container IP based on guessing the machine index
 		index := driver.IndexFromMachineName(d.NodeConfig.MachineName)
-		if int(ip[3])+index > 255 {
+		if int(ip[3])+index > 253 { // reserve last client ip address for multi-control-plane loadbalancer vip address in ha cluster
 			return fmt.Errorf("too many machines to calculate an IP")
 		}
 		ip[3] += byte(index)
@@ -158,7 +173,7 @@ func (d *Driver) Create() error {
 		} else {
 			// The conflicting container name was not created by minikube
 			// user has a container that conflicts with minikube profile name, will not delete users container.
-			return errors.Wrapf(err, "user has a conflicting container name %q with minikube container. Needs to be deleted by user's consent.", params.Name)
+			return errors.Wrapf(err, "user has a conflicting container name %q with minikube container. Needs to be deleted by user's consent", params.Name)
 		}
 	}
 
@@ -185,7 +200,7 @@ func (d *Driver) Create() error {
 			}
 			klog.Infof("Unable to extract preloaded tarball to volume: %v", err)
 		} else {
-			klog.Infof("duration metric: took %f seconds to extract preloaded images to volume", time.Since(t).Seconds())
+			klog.Infof("duration metric: took %s to extract preloaded images to volume ...", time.Since(t))
 		}
 	}()
 	waitForPreload.Wait()
@@ -260,11 +275,7 @@ func (d *Driver) prepareSSH() error {
 			icaclsCmdOut, icaclsCmdErr := icaclsCmd.CombinedOutput()
 
 			if icaclsCmdErr != nil {
-				return errors.Wrap(icaclsCmdErr, "unable to execute icacls to set permissions")
-			}
-
-			if !strings.Contains(string(icaclsCmdOut), "Successfully processed 1 files; Failed processing 0 files") {
-				klog.Errorf("icacls failed applying permissions - err - [%s], output - [%s]", icaclsCmdErr, strings.TrimSpace(string(icaclsCmdOut)))
+				return errors.Wrap(icaclsCmdErr, fmt.Sprintf("unable to execute icacls to set permissions: %s", icaclsCmdOut))
 			}
 		}
 	}
@@ -347,7 +358,7 @@ func (d *Driver) Kill() error {
 		klog.Warningf("couldn't shutdown the container, will continue with kill anyways: %v", err)
 	}
 
-	cr := command.NewExecRunner(false) // using exec runner for interacting with dameon.
+	cr := command.NewExecRunner(false) // using exec runner for interacting with daemon.
 	if _, err := cr.RunCmd(oci.PrefixCmd(exec.Command(d.NodeConfig.OCIBinary, "kill", d.MachineName))); err != nil {
 		return errors.Wrapf(err, "killing %q", d.MachineName)
 	}
@@ -403,8 +414,7 @@ func (d *Driver) Restart() error {
 func (d *Driver) Start() error {
 	if err := oci.StartContainer(d.NodeConfig.OCIBinary, d.MachineName); err != nil {
 		oci.LogContainerDebug(d.OCIBinary, d.MachineName)
-		_, err := oci.DaemonInfo(d.OCIBinary)
-		if err != nil {
+		if _, err := oci.DaemonInfo(d.OCIBinary); err != nil {
 			return errors.Wrapf(oci.ErrDaemonInfo, "debug daemon info %q", d.MachineName)
 		}
 		return errors.Wrap(err, "start")

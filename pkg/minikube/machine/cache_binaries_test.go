@@ -18,7 +18,6 @@ package machine
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 
@@ -32,7 +31,7 @@ type copyFailRunner struct {
 	command.Runner
 }
 
-func (copyFailRunner) Copy(a assets.CopyableFile) error {
+func (copyFailRunner) Copy(_ assets.CopyableFile) error {
 	return fmt.Errorf("test error during copy file")
 }
 
@@ -73,10 +72,10 @@ func TestCopyBinary(t *testing.T) {
 		t.Run(test.desc, func(t *testing.T) {
 			err := CopyBinary(test.runner, test.src, test.dst)
 			if err != nil && !test.err {
-				t.Fatalf("Error %v expected but not occurred", err)
+				t.Fatalf("Got unexpected error %v", err)
 			}
 			if err == nil && test.err {
-				t.Fatal("Unexpected error")
+				t.Fatal("Expected error but got nil")
 			}
 		})
 	}
@@ -85,43 +84,28 @@ func TestCopyBinary(t *testing.T) {
 func TestCacheBinariesForBootstrapper(t *testing.T) {
 	download.DownloadMock = download.CreateDstDownloadMock
 
-	oldMinikubeHome := os.Getenv("MINIKUBE_HOME")
-	defer os.Setenv("MINIKUBE_HOME", oldMinikubeHome)
-
-	minikubeHome, err := os.MkdirTemp("/tmp", "")
-	if err != nil {
-		t.Fatalf("error during creating tmp dir: %v", err)
-	}
-
-	defer func() { // clean up tempdir
-		err := os.RemoveAll(minikubeHome)
-		if err != nil {
-			t.Errorf("failed to clean up temp folder  %q", minikubeHome)
-		}
-	}()
+	minikubeHome := t.TempDir()
 
 	var tc = []struct {
-		version, clusterBootstrapper string
-		minikubeHome                 string
-		err                          bool
+		version      string
+		minikubeHome string
+		err          bool
 	}{
 		{
-			version:             "v1.16.0",
-			clusterBootstrapper: bootstrapper.Kubeadm,
-			err:                 false,
-			minikubeHome:        minikubeHome,
+			version:      "v1.16.0",
+			err:          false,
+			minikubeHome: minikubeHome,
 		},
 		{
-			version:             "invalid version",
-			clusterBootstrapper: bootstrapper.Kubeadm,
-			err:                 true,
-			minikubeHome:        minikubeHome,
+			version:      "invalid version",
+			err:          true,
+			minikubeHome: minikubeHome,
 		},
 	}
 	for _, test := range tc {
 		t.Run(test.version, func(t *testing.T) {
-			os.Setenv("MINIKUBE_HOME", test.minikubeHome)
-			err := CacheBinariesForBootstrapper(test.version, test.clusterBootstrapper, nil, "")
+			t.Setenv("MINIKUBE_HOME", test.minikubeHome)
+			err := CacheBinariesForBootstrapper(test.version, nil, "")
 			if err != nil && !test.err {
 				t.Fatalf("Got unexpected error %v", err)
 			}
@@ -133,8 +117,7 @@ func TestCacheBinariesForBootstrapper(t *testing.T) {
 }
 
 func TestExcludedBinariesNotDownloaded(t *testing.T) {
-	clusterBootstrapper := bootstrapper.Kubeadm
-	binaryList := bootstrapper.GetCachedBinaryList(clusterBootstrapper)
+	binaryList := bootstrapper.GetCachedBinaryList()
 	binaryToExclude := binaryList[0]
 
 	download.DownloadMock = func(src, dst string) error {
@@ -144,23 +127,10 @@ func TestExcludedBinariesNotDownloaded(t *testing.T) {
 		return download.CreateDstDownloadMock(src, dst)
 	}
 
-	oldMinikubeHome := os.Getenv("MINIKUBE_HOME")
-	defer os.Setenv("MINIKUBE_HOME", oldMinikubeHome)
+	minikubeHome := t.TempDir()
+	t.Setenv("MINIKUBE_HOME", minikubeHome)
 
-	minikubeHome, err := os.MkdirTemp("/tmp", "")
-	if err != nil {
-		t.Fatalf("error during creating tmp dir: %v", err)
-	}
-	os.Setenv("MINIKUBE_HOME", minikubeHome)
-
-	defer func() { // clean up tempdir
-		err := os.RemoveAll(minikubeHome)
-		if err != nil {
-			t.Errorf("failed to clean up temp folder  %q", minikubeHome)
-		}
-	}()
-
-	if err := CacheBinariesForBootstrapper("v1.16.0", clusterBootstrapper, []string{binaryToExclude}, ""); err != nil {
+	if err := CacheBinariesForBootstrapper("v1.16.0", []string{binaryToExclude}, ""); err != nil {
 		t.Errorf("Failed to cache binaries: %v", err)
 	}
 }
