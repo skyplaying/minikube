@@ -23,7 +23,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/drivers/kic/oci"
 	"k8s.io/minikube/pkg/minikube/constants"
@@ -44,18 +47,22 @@ const (
 	SSH = "ssh"
 	// KVM2 driver
 	KVM2 = "kvm2"
+	// QEMU2 driver
+	QEMU2 = "qemu2"
+	// QEMU driver
+	QEMU = "qemu"
 	// VirtualBox driver
 	VirtualBox = "virtualbox"
 	// HyperKit driver
 	HyperKit = "hyperkit"
 	// VMware driver
 	VMware = "vmware"
-	// VMwareFusion driver (obsolete)
-	VMwareFusion = "vmwarefusion"
 	// HyperV driver
 	HyperV = "hyperv"
 	// Parallels driver
 	Parallels = "parallels"
+	// VFKit driver
+	VFKit = "vfkit"
 
 	// AliasKVM is driver name alias for kvm2
 	AliasKVM = "kvm"
@@ -63,6 +70,8 @@ const (
 	AliasSSH = "generic"
 	// AliasNative is driver name alias for None driver
 	AliasNative = "native"
+	// AliasQEMU is the driver name alias for qemu2
+	AliasQEMU = "qemu"
 )
 
 var (
@@ -149,9 +158,19 @@ func IsMock(name string) bool {
 	return name == Mock
 }
 
+// IsNone checks if the driver is a none
+func IsNone(name string) bool {
+	return name == None
+}
+
 // IsKVM checks if the driver is a KVM[2]
 func IsKVM(name string) bool {
 	return name == KVM2 || name == AliasKVM
+}
+
+// IsQEMU checks if the driver is a QEMU[2]
+func IsQEMU(name string) bool {
+	return name == QEMU2 || name == QEMU
 }
 
 // IsVM checks if the driver is a VM
@@ -170,6 +189,21 @@ func BareMetal(name string) bool {
 // IsSSH checks if the driver is ssh
 func IsSSH(name string) bool {
 	return name == SSH
+}
+
+// IsVirtualBox checks if the driver is VirtualBox
+func IsVirtualBox(name string) bool {
+	return name == VirtualBox
+}
+
+// IsVMware checks if the driver is VMware
+func IsVMware(name string) bool {
+	return name == VMware
+}
+
+// IsHyperV check if the driver is Hyper-V
+func IsHyperV(name string) bool {
+	return name == HyperV
 }
 
 // AllowsPreload returns if preload is allowed for the driver
@@ -193,6 +227,9 @@ func NeedsPortForward(name string) bool {
 	si, err := oci.CachedDaemonInfo(name)
 	if err != nil {
 		panic(err)
+	}
+	if runtime.GOOS == "linux" && si.DockerOS == "Docker Desktop" {
+		return true
 	}
 	return si.Rootless
 }
@@ -221,7 +258,7 @@ func FullName(name string) string {
 		}
 		return "Docker"
 	default:
-		return strings.Title(name)
+		return cases.Title(language.Und).String(name)
 	}
 }
 
@@ -235,14 +272,14 @@ type FlagHints struct {
 
 // FlagDefaults returns suggested defaults based on a driver
 func FlagDefaults(name string) FlagHints {
-	fh := FlagHints{ExtraOptions: []string{"kubelet.housekeeping-interval=5m"}}
+	fh := FlagHints{}
 	if name != None {
 		fh.CacheImages = true
 		return fh
 	}
 
 	fh.CacheImages = false
-	// if specifc linux add this option for systemd work on none driver
+	// if specific linux add this option for systemd work on none driver
 	if _, err := os.Stat(systemdResolvConf); err == nil {
 		noneEO := fmt.Sprintf("kubelet.resolv-conf=%s", systemdResolvConf)
 		fh.ExtraOptions = append(fh.ExtraOptions, noneEO)
@@ -320,12 +357,25 @@ func Suggest(options []registry.DriverState) (registry.DriverState, []registry.D
 // Status returns the status of a driver
 func Status(name string) registry.DriverState {
 	d := registry.Driver(name)
-	return registry.DriverState{
-		Name:     d.Name,
-		Default:  d.Default,
-		Priority: d.Priority,
-		State:    registry.Status(name),
+	stateChannel := make(chan registry.State)
+	timeoutChannel := time.After(20 * time.Second)
+	go func() {
+		stateChannel <- registry.Status(name)
+	}()
+	select {
+	case s := <-stateChannel:
+		return registry.DriverState{
+			Name:     d.Name,
+			Default:  d.Default,
+			Priority: d.Priority,
+			State:    s,
+		}
+	case <-timeoutChannel:
+		klog.Infof("time out when checking for status of %s driver", name)
+		return registry.DriverState{}
+
 	}
+
 }
 
 // IsAlias checks if an alias belongs to provided driver by name.

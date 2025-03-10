@@ -24,11 +24,11 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
-	"github.com/juju/mutex"
+	"github.com/juju/mutex/v2"
 	"github.com/pkg/errors"
 	"golang.org/x/sync/errgroup"
 	"k8s.io/klog/v2"
-	"k8s.io/minikube/pkg/minikube/constants"
+	"k8s.io/minikube/pkg/minikube/detect"
 	"k8s.io/minikube/pkg/minikube/localpath"
 	"k8s.io/minikube/pkg/minikube/out"
 	"k8s.io/minikube/pkg/util/lock"
@@ -48,7 +48,7 @@ var errCacheImageDoesntExist = &cacheError{errors.New("the image you are trying 
 // DeleteFromCacheDir deletes tar files stored in cache dir
 func DeleteFromCacheDir(images []string) error {
 	for _, image := range images {
-		path := filepath.Join(constants.ImageCacheDir, image)
+		path := filepath.Join(detect.ImageCacheDir(), image)
 		path = localpath.SanitizeCacheDir(path)
 		klog.Infoln("Deleting image in cache at ", path)
 		if err := os.Remove(path); err != nil {
@@ -61,8 +61,8 @@ func DeleteFromCacheDir(images []string) error {
 // SaveToDir will cache images on the host
 //
 // The cache directory currently caches images using the imagename_tag
-// For example, k8s.gcr.io/kube-addon-manager:v6.5 would be
-// stored at $CACHE_DIR/k8s.gcr.io/kube-addon-manager_v6.5
+// For example, registry.k8s.io/kube-addon-manager:v6.5 would be
+// stored at $CACHE_DIR/registry.k8s.io/kube-addon-manager_v6.5
 func SaveToDir(images []string, cacheDir string, overwrite bool) error {
 	var g errgroup.Group
 	for _, image := range images {
@@ -131,6 +131,7 @@ func saveToTarFile(iname, rawDest string, overwrite bool) error {
 
 	img, cname, err := retrieveImage(ref, iname)
 	if err != nil {
+		klog.V(2).ErrorS(err, "an error while retrieving the image")
 		return errCacheImageDoesntExist
 	}
 	if img == nil {

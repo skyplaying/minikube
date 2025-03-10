@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -51,6 +52,10 @@ import (
 	"k8s.io/minikube/pkg/minikube/machine"
 	"k8s.io/minikube/pkg/minikube/out"
 	_ "k8s.io/minikube/pkg/provision"
+
+	dconfig "github.com/docker/cli/cli/config"
+	ddocker "github.com/docker/cli/cli/context/docker"
+	dstore "github.com/docker/cli/cli/context/store"
 )
 
 const minikubeEnableProfile = "MINIKUBE_ENABLE_PROFILING"
@@ -60,11 +65,15 @@ var (
 	// unexpected errors from libmachine to the user.
 	machineLogErrorRe   = regexp.MustCompile(`VirtualizationException`)
 	machineLogWarningRe = regexp.MustCompile(`(?i)warning`)
+	// This regex is to filter out logs that contain environment variables which could contain sensitive information
+	machineLogEnvironmentRe = regexp.MustCompile(`&exec\.Cmd`)
 )
 
 func main() {
 	bridgeLogMessages()
 	defer klog.Flush()
+
+	propagateDockerContextToEnv()
 
 	// Don't parse flags when running as kubectl
 	_, callingCmd := filepath.Split(os.Args[0])
@@ -122,7 +131,9 @@ type machineLogBridge struct{}
 
 // Write passes machine driver logs to klog
 func (lb machineLogBridge) Write(b []byte) (n int, err error) {
-	if machineLogErrorRe.Match(b) {
+	if machineLogEnvironmentRe.Match(b) {
+		return len(b), nil
+	} else if machineLogErrorRe.Match(b) {
 		klog.Errorf("libmachine: %s", b)
 	} else if machineLogWarningRe.Match(b) {
 		klog.Warningf("libmachine: %s", b)
@@ -176,7 +187,7 @@ func logFileName(dir string, logIdx int64) string {
 
 // setFlags sets the flags
 func setFlags(parse bool) {
-	// parse flags beyond subcommand - get aroung go flag 'limitations':
+	// parse flags beyond subcommand - get around go flag 'limitations':
 	// "Flag parsing stops just before the first non-flag argument" (ref: https://pkg.go.dev/flag#hdr-Command_line_flag_syntax)
 	pflag.CommandLine.ParseErrorsWhitelist.UnknownFlags = true
 	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
@@ -225,7 +236,7 @@ func setFlags(parse bool) {
 
 // setLastStartFlags sets the log_file flag to lastStart.txt if start command and user doesn't specify log_file or log_dir flags.
 func setLastStartFlags() {
-	if len(os.Args) < 2 || os.Args[1] != "start" {
+	if pflag.Arg(0) != "start" {
 		return
 	}
 	if pflag.CommandLine.Changed("log_file") || pflag.CommandLine.Changed("log_dir") {
@@ -241,5 +252,57 @@ func setLastStartFlags() {
 	}
 	if err := pflag.Set("log_file", fp); err != nil {
 		klog.Warningf("Unable to set default flag value for log_file: %v", err)
+	}
+}
+
+// propagateDockerContextToEnv propagates the current context in ~/.docker/config.json to $DOCKER_HOST,
+// so that google/go-containerregistry can pick it up.
+func propagateDockerContextToEnv() {
+	if os.Getenv("DOCKER_HOST") != "" {
+		// Already explicitly set
+		return
+	}
+	currentContext := os.Getenv("DOCKER_CONTEXT")
+	if currentContext == "" {
+		dockerConfigDir := dconfig.Dir()
+		if _, err := os.Stat(dockerConfigDir); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				klog.Warning(err)
+			}
+			return
+		}
+		cf, err := dconfig.Load(dockerConfigDir)
+		if err != nil {
+			klog.Warningf("Unable to load the current Docker config from %q: %v", dockerConfigDir, err)
+			return
+		}
+		currentContext = cf.CurrentContext
+	}
+	if currentContext == "" {
+		return
+	}
+	storeConfig := dstore.NewConfig(
+		func() interface{} { return &ddocker.EndpointMeta{} },
+		dstore.EndpointTypeGetter(ddocker.DockerEndpoint, func() interface{} { return &ddocker.EndpointMeta{} }),
+	)
+	st := dstore.New(dconfig.ContextStoreDir(), storeConfig)
+	md, err := st.GetMetadata(currentContext)
+	if err != nil {
+		klog.Warningf("Unable to resolve the current Docker CLI context %q: %v", currentContext, err)
+		klog.Warningf("Try running `docker context use %s` to resolve the above error", currentContext)
+		return
+	}
+	dockerEP, ok := md.Endpoints[ddocker.DockerEndpoint]
+	if !ok {
+		// No warning (the context is not for Docker)
+		return
+	}
+	dockerEPMeta, ok := dockerEP.(ddocker.EndpointMeta)
+	if !ok {
+		klog.Warningf("expected docker.EndpointMeta, got %T", dockerEP)
+		return
+	}
+	if dockerEPMeta.Host != "" {
+		os.Setenv("DOCKER_HOST", dockerEPMeta.Host)
 	}
 }
