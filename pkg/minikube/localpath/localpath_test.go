@@ -18,7 +18,6 @@ package localpath
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -28,20 +27,11 @@ import (
 )
 
 func TestReplaceWinDriveLetterToVolumeName(t *testing.T) {
-	path, err := os.MkdirTemp("", "repwindl2vn")
-	if err != nil {
-		t.Fatalf("Error make tmp directory: %v", err)
-	}
-	defer func(path string) { // clean up tempdir
-		err := os.RemoveAll(path)
-		if err != nil {
-			t.Errorf("failed to clean up temp folder  %q", path)
-		}
-	}(path)
+	path := t.TempDir()
 
 	if runtime.GOOS != "windows" {
 		// Replace to fake func.
-		getWindowsVolumeName = func(d string) (string, error) {
+		getWindowsVolumeName = func(_ string) (string, error) {
 			return `/`, nil
 		}
 		// Add dummy Windows drive letter.
@@ -79,17 +69,10 @@ func TestMiniPath(t *testing.T) {
 		{"/tmp/", "/tmp"},
 		{"", homedir.HomeDir()},
 	}
-	originalEnv := os.Getenv(MinikubeHome)
-	defer func() { // revert to pre-test env var
-		err := os.Setenv(MinikubeHome, originalEnv)
-		if err != nil {
-			t.Fatalf("Error reverting env %s to its original value (%s) var after test ", MinikubeHome, originalEnv)
-		}
-	}()
 	for _, tc := range testCases {
 		t.Run(tc.env, func(t *testing.T) {
 			expectedPath := filepath.Join(tc.basePath, ".minikube")
-			os.Setenv(MinikubeHome, tc.env)
+			t.Setenv(MinikubeHome, tc.env)
 			path := MiniPath()
 			if path != expectedPath {
 				t.Errorf("MiniPath expected to return '%s', but got '%s'", expectedPath, path)

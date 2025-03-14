@@ -19,6 +19,7 @@ package image
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -36,7 +37,7 @@ import (
 
 	"github.com/pkg/errors"
 	"k8s.io/klog/v2"
-	"k8s.io/minikube/pkg/minikube/constants"
+	"k8s.io/minikube/pkg/minikube/detect"
 	"k8s.io/minikube/pkg/minikube/localpath"
 )
 
@@ -154,15 +155,12 @@ func retrieveImage(ref name.Reference, imgName string) (v1.Image, string, error)
 		}
 	}
 	if useRemote {
-		ref, canonicalName, err := fixRemoteImageName(ref, imgName)
-		if err != nil {
-			return nil, "", err
-		}
+		cname := canonicalName(ref)
 		img, err = retrieveRemote(ref, defaultPlatform)
 		if err == nil {
 			img, err = fixPlatform(ref, img, defaultPlatform)
 			if err == nil {
-				return img, canonicalName, nil
+				return img, cname, nil
 			}
 		}
 	}
@@ -198,7 +196,7 @@ func retrieveRemote(ref name.Reference, p v1.Platform) (v1.Image, error) {
 
 // imagePathInCache returns path in local cache directory
 func imagePathInCache(img string) string {
-	f := filepath.Join(constants.ImageCacheDir, img)
+	f := filepath.Join(detect.ImageCacheDir(), img)
 	f = localpath.SanitizeCacheDir(f)
 	return f
 }
@@ -210,7 +208,24 @@ func UploadCachedImage(imgName string) error {
 		klog.Infof("error parsing image name %s tag %v ", imgName, err)
 		return err
 	}
-	return uploadImage(tag, imagePathInCache(imgName))
+	if err := uploadImage(tag, imagePathInCache(imgName)); err != nil {
+		// this time try determine image tags from tarball
+
+		manifest, err := tarball.LoadManifest(func() (io.ReadCloser, error) {
+			return os.Open(imagePathInCache(imgName))
+		})
+		if err != nil || len(manifest) == 0 || len(manifest[0].RepoTags) == 0 {
+			return fmt.Errorf("failed to determine the image tag from tarball, err: %v", err)
+		}
+
+		tag, err = name.NewTag(manifest[0].RepoTags[0], name.WeakValidation)
+		if err != nil {
+			klog.Infof("error parsing image name: %s ", err.Error())
+			return err
+		}
+		return uploadImage(tag, imagePathInCache(imgName))
+	}
+	return nil
 }
 
 func uploadImage(tag name.Tag, p string) error {
@@ -278,7 +293,7 @@ func fixPlatform(ref name.Reference, img v1.Image, p v1.Platform) (v1.Image, err
 }
 
 func cleanImageCacheDir() error {
-	err := filepath.Walk(constants.ImageCacheDir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(localpath.MakeMiniPath("cache", "images"), func(path string, info os.FileInfo, err error) error {
 		// If error is not nil, it's because the path was already deleted and doesn't exist
 		// Move on to next path
 		if err != nil {
@@ -305,10 +320,11 @@ func cleanImageCacheDir() error {
 
 // normalizeTagName automatically tag latest to image
 // Example:
-//  nginx -> nginx:latest
-//  localhost:5000/nginx -> localhost:5000/nginx:latest
-//  localhost:5000/nginx:latest -> localhost:5000/nginx:latest
-//  docker.io/dotnet/core/sdk -> docker.io/dotnet/core/sdk:latest
+//
+//	nginx -> nginx:latest
+//	localhost:5000/nginx -> localhost:5000/nginx:latest
+//	localhost:5000/nginx:latest -> localhost:5000/nginx:latest
+//	docker.io/dotnet/core/sdk -> docker.io/dotnet/core/sdk:latest
 func normalizeTagName(image string) string {
 	base := image
 	tag := "latest"
@@ -322,21 +338,8 @@ func normalizeTagName(image string) string {
 	return base + ":" + tag
 }
 
-func fixRemoteImageName(ref name.Reference, imgName string) (name.Reference, string, error) {
-	const aliyunMirror = "registry.cn-hangzhou.aliyuncs.com/google_containers/"
-	if strings.HasPrefix(imgName, aliyunMirror) {
-		// for aliyun registry must strip namespace from image name, e.g.
-		//   registry.cn-hangzhou.aliyuncs.com/google_containers/coredns/coredns:v1.8.0 will not work
-		//   registry.cn-hangzhou.aliyuncs.com/google_containers/coredns:1.8.0 does work
-		image := strings.TrimPrefix(imgName, aliyunMirror)
-		image = strings.TrimPrefix(image, "k8s-minikube/")
-		image = strings.TrimPrefix(image, "kubernetesui/")
-		image = strings.TrimPrefix(image, "coredns/")
-		remoteRef, err := name.ParseReference(aliyunMirror+image, name.WeakValidation)
-		if err != nil {
-			return nil, "", err
-		}
-		return remoteRef, canonicalName(ref), nil
-	}
-	return ref, canonicalName(ref), nil
+// Remove docker.io prefix since it won't be included in image names
+// when we call `docker images`.
+func TrimDockerIO(name string) string {
+	return strings.TrimPrefix(name, "docker.io/")
 }

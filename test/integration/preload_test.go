@@ -1,5 +1,4 @@
 //go:build integration
-// +build integration
 
 /*
 Copyright 2020 The Kubernetes Authors All rights reserved.
@@ -33,17 +32,13 @@ func TestPreload(t *testing.T) {
 		t.Skipf("skipping %s - incompatible with none driver", t.Name())
 	}
 
-	if arm64Platform() {
-		t.Skipf("skipping %s - not yet supported on arm64. See https://github.com/kubernetes/minikube/issues/10144", t.Name())
-	}
-
 	profile := UniqueProfileName("test-preload")
 	ctx, cancel := context.WithTimeout(context.Background(), Minutes(40))
 	defer CleanupWithLogs(t, profile, cancel)
 
 	startArgs := []string{"start", "-p", profile, "--memory=2200", "--alsologtostderr", "--wait=true", "--preload=false"}
 	startArgs = append(startArgs, StartArgs()...)
-	k8sVersion := "v1.17.0"
+	k8sVersion := "v1.24.4"
 	startArgs = append(startArgs, fmt.Sprintf("--kubernetes-version=%s", k8sVersion))
 
 	rr, err := Run(t, exec.CommandContext(ctx, Target(), startArgs...))
@@ -53,36 +48,31 @@ func TestPreload(t *testing.T) {
 
 	// Now, pull the busybox image into minikube
 	image := "gcr.io/k8s-minikube/busybox"
-	var cmd *exec.Cmd
-	if ContainerRuntime() == "docker" {
-		cmd = exec.CommandContext(ctx, Target(), "ssh", "-p", profile, "--", "docker", "pull", image)
-	} else {
-		cmd = exec.CommandContext(ctx, Target(), "ssh", "-p", profile, "--", "sudo", "crictl", "pull", image)
-	}
+	cmd := exec.CommandContext(ctx, Target(), "-p", profile, "image", "pull", image)
 	rr, err = Run(t, cmd)
 	if err != nil {
 		t.Fatalf("%s failed: %v", rr.Command(), err)
 	}
 
-	// Restart minikube with v1.17.3, which has a preloaded tarball
+	// stop the cluster
+	rr, err = Run(t, exec.CommandContext(ctx, Target(), "stop", "-p", profile))
+	if err != nil {
+		t.Fatalf("%s failed: %v", rr.Command(), err)
+	}
+
+	// re-start the cluster and check if image is preserved
 	startArgs = []string{"start", "-p", profile, "--memory=2200", "--alsologtostderr", "-v=1", "--wait=true"}
 	startArgs = append(startArgs, StartArgs()...)
-	k8sVersion = "v1.17.3"
-	startArgs = append(startArgs, fmt.Sprintf("--kubernetes-version=%s", k8sVersion))
 	rr, err = Run(t, exec.CommandContext(ctx, Target(), startArgs...))
 	if err != nil {
 		t.Fatalf("%s failed: %v", rr.Command(), err)
 	}
-	if ContainerRuntime() == "docker" {
-		cmd = exec.CommandContext(ctx, Target(), "ssh", "-p", profile, "--", "docker", "images")
-	} else {
-		cmd = exec.CommandContext(ctx, Target(), "ssh", "-p", profile, "--", "sudo", "crictl", "image", "ls")
-	}
+	cmd = exec.CommandContext(ctx, Target(), "-p", profile, "image", "list")
 	rr, err = Run(t, cmd)
 	if err != nil {
 		t.Fatalf("%s failed: %v", rr.Command(), err)
 	}
 	if !strings.Contains(rr.Output(), image) {
-		t.Fatalf("Expected to find %s in output of `docker images`, instead got %s", image, rr.Output())
+		t.Fatalf("Expected to find %s in image list output, instead got %s", image, rr.Output())
 	}
 }

@@ -17,31 +17,37 @@ limitations under the License.
 package kic
 
 import (
+	"bufio"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"runtime"
 
 	"github.com/phayes/freeport"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/klog/v2"
 
 	"k8s.io/minikube/pkg/minikube/out"
 	"k8s.io/minikube/pkg/minikube/style"
 )
 
 type sshConn struct {
-	name       string
-	service    string
-	cmd        *exec.Cmd
-	ports      []int
-	activeConn bool
+	name           string
+	service        string
+	cmd            *exec.Cmd
+	ports          []int
+	activeConn     bool
+	suppressStdOut bool
 }
 
-func createSSHConn(name, sshPort, sshKey string, resourcePorts []int32, resourceIP string, resourceName string) *sshConn {
+func createSSHConn(name, sshPort, sshKey, bindAddress string, resourcePorts []int32, resourceIP string, resourceName string) *sshConn {
 	// extract sshArgs
 	sshArgs := []string{
 		// TODO: document the options here
 		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "StrictHostKeyChecking=no",
+		"-o", "IdentitiesOnly=yes",
 		"-N",
 		"docker@127.0.0.1",
 		"-p", sshPort,
@@ -51,12 +57,25 @@ func createSSHConn(name, sshPort, sshKey string, resourcePorts []int32, resource
 	askForSudo := false
 	var privilegedPorts []int32
 	for _, port := range resourcePorts {
-		arg := fmt.Sprintf(
-			"-L %d:%s:%d",
-			port,
-			resourceIP,
-			port,
-		)
+		var arg string
+		if bindAddress == "" || bindAddress == "*" {
+			// bind on all interfaces
+			arg = fmt.Sprintf(
+				"-L %d:%s:%d",
+				port,
+				resourceIP,
+				port,
+			)
+		} else {
+			// bind on specify address only
+			arg = fmt.Sprintf(
+				"-L %s:%d:%s:%d",
+				bindAddress,
+				port,
+				resourceIP,
+				port,
+			)
+		}
 
 		// check if any port is privileged
 		if port < 1024 {
@@ -101,6 +120,7 @@ func createSSHConnWithRandomPorts(name, sshPort, sshKey string, svc *v1.Service)
 		// TODO: document the options here
 		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "StrictHostKeyChecking=no",
+		"-o", "IdentitiesOnly=yes",
 		"-N",
 		"docker@127.0.0.1",
 		"-p", sshPort,
@@ -138,12 +158,18 @@ func createSSHConnWithRandomPorts(name, sshPort, sshKey string, svc *v1.Service)
 }
 
 func (c *sshConn) startAndWait() error {
-	out.Step(style.Running, "Starting tunnel for service {{.service}}.", out.V{"service": c.service})
+	if !c.suppressStdOut {
+		out.Step(style.Running, "Starting tunnel for service {{.service}}.", out.V{"service": c.service})
+	}
 
+	r, w := io.Pipe()
+	c.cmd.Stdout = w
+	c.cmd.Stderr = w
 	err := c.cmd.Start()
 	if err != nil {
 		return err
 	}
+	go logOutput(r, c.service)
 
 	c.activeConn = true
 	// we ignore wait error because the process will be killed
@@ -155,12 +181,31 @@ func (c *sshConn) startAndWait() error {
 	return nil
 }
 
+func logOutput(r io.Reader, service string) {
+	s := bufio.NewScanner(r)
+	for s.Scan() {
+		klog.Infof("%s tunnel: %s", service, s.Text())
+	}
+	if err := s.Err(); err != nil {
+		klog.Warningf("failed to read: %v", err)
+	}
+}
+
 func (c *sshConn) stop() error {
 	if c.activeConn {
 		c.activeConn = false
-		out.Step(style.Stopping, "Stopping tunnel for service {{.service}}.", out.V{"service": c.service})
-		return c.cmd.Process.Kill()
+		if !c.suppressStdOut {
+			out.Step(style.Stopping, "Stopping tunnel for service {{.service}}.", out.V{"service": c.service})
+		}
+		err := c.cmd.Process.Kill()
+		if err == os.ErrProcessDone {
+			// No need to return an error here
+			return nil
+		}
+		return err
 	}
-	out.Step(style.Stopping, "Stopped tunnel for service {{.service}}.", out.V{"service": c.service})
+	if !c.suppressStdOut {
+		out.Step(style.Stopping, "Stopped tunnel for service {{.service}}.", out.V{"service": c.service})
+	}
 	return nil
 }
