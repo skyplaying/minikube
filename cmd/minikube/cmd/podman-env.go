@@ -14,9 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Part of this code is heavily inspired/copied by the following file:
-// github.com/docker/machine/commands/env.go
-
 package cmd
 
 import (
@@ -141,7 +138,7 @@ var podmanEnvCmd = &cobra.Command{
 	Use:   "podman-env",
 	Short: "Configure environment to use minikube's Podman service",
 	Long:  `Sets up podman env variables; similar to '$(podman-machine env)'.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, _ []string) {
 		sh := shell.EnvConfig{
 			Shell: shell.ForceShell,
 		}
@@ -168,6 +165,11 @@ var podmanEnvCmd = &cobra.Command{
 
 		if len(co.Config.Nodes) > 1 {
 			exit.Message(reason.Usage, `The podman-env command is incompatible with multi-node clusters. Use the 'registry' add-on: https://minikube.sigs.k8s.io/docs/handbook/registry/`)
+		}
+
+		if co.Config.KubernetesConfig.ContainerRuntime != constants.CRIO {
+			exit.Message(reason.Usage, `The podman-env command is only compatible with the "crio" runtime, but this cluster was configured to use the "{{.runtime}}" runtime.`,
+				out.V{"runtime": co.Config.KubernetesConfig.ContainerRuntime})
 		}
 
 		r := co.CP.Runner
@@ -240,7 +242,7 @@ func podmanSetScript(ec PodmanEnvConfig, w io.Writer) error {
 		podmanEnvTmpl = podmanEnv2Tmpl
 	}
 	envVars := podmanEnvVars(ec)
-	return shell.SetScript(ec.EnvConfig, w, podmanEnvTmpl, podmanShellCfgSet(ec, envVars))
+	return shell.SetScript(w, podmanEnvTmpl, podmanShellCfgSet(ec, envVars))
 }
 
 // podmanUnsetScript writes out a shell-compatible 'podman-env unset' script

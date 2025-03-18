@@ -20,6 +20,7 @@ package cruntime
 import (
 	"fmt"
 	"os/exec"
+	"strings"
 
 	"github.com/blang/semver/v4"
 	"github.com/pkg/errors"
@@ -80,7 +81,7 @@ type Manager interface {
 	// Version retrieves the current version of this runtime
 	Version() (string, error)
 	// Enable idempotently enables this runtime on a host
-	Enable(bool, bool, bool) error
+	Enable(bool, string, bool) error
 	// Disable idempotently disables this runtime on a host
 	Disable() error
 	// Active returns whether or not a runtime is active on a host
@@ -146,12 +147,16 @@ type Config struct {
 	Socket string
 	// Runner is the CommandRunner object to execute commands with
 	Runner CommandRunner
+	// NetworkPlugin name of networking plugin ("cni")
+	NetworkPlugin string
 	// ImageRepository image repository to download image from
 	ImageRepository string
 	// KubernetesVersion Kubernetes version
 	KubernetesVersion semver.Version
 	// InsecureRegistry list of insecure registries
 	InsecureRegistry []string
+	// GPUs add GPU devices to the container
+	GPUs string
 }
 
 // ListContainersOptions are the options to use for listing containers
@@ -218,11 +223,13 @@ func New(c Config) (Manager, error) {
 		return &Docker{
 			Socket:            sp,
 			Runner:            c.Runner,
+			NetworkPlugin:     c.NetworkPlugin,
 			ImageRepository:   c.ImageRepository,
 			KubernetesVersion: c.KubernetesVersion,
 			Init:              sm,
 			UseCRI:            (sp != ""), // !dockershim
 			CRIService:        cs,
+			GPUs:              c.GPUs,
 		}, nil
 	case "crio", "cri-o":
 		return &CRIO{
@@ -315,4 +322,23 @@ func CheckCompatibility(cr Manager) error {
 		return errors.Wrap(err, "Failed to check container runtime version")
 	}
 	return compatibleWithVersion(cr.Name(), v)
+}
+
+// CheckKernelCompatibility returns an error when the kernel is older than the specified version.
+func CheckKernelCompatibility(cr CommandRunner, major, minor int) error {
+	expected := fmt.Sprintf("%d.%d", major, minor)
+	unameRes, err := cr.RunCmd(exec.Command("uname", "-r"))
+	if err != nil {
+		return err
+	}
+	actual := strings.TrimSpace(unameRes.Stdout.String())
+	sortRes, err := cr.RunCmd(exec.Command("sh", "-euc", fmt.Sprintf(`(echo %s; echo %s) | sort -V | head -n1`, actual, expected)))
+	if err != nil {
+		return err
+	}
+	comparison := strings.TrimSpace(sortRes.Stdout.String())
+	if comparison != expected {
+		return NewErrServiceVersion("kernel", expected, actual)
+	}
+	return nil
 }

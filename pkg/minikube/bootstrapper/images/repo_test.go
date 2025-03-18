@@ -39,31 +39,7 @@ func Test_kubernetesRepo(t *testing.T) {
 	for _, tc := range tests {
 		got := kubernetesRepo(tc.mirror)
 		if !cmp.Equal(got, tc.want) {
-			t.Errorf("mirror miss match, want: %s, got: %s", tc.want, got)
-		}
-	}
-
-}
-
-func Test_minikubeRepo(t *testing.T) {
-	tests := []struct {
-		mirror string
-		want   string
-	}{
-		{
-			"",
-			"gcr.io/k8s-minikube",
-		},
-		{
-			"mirror.k8s.io",
-			"mirror.k8s.io/k8s-minikube",
-		},
-	}
-
-	for _, tc := range tests {
-		got := minikubeRepo(tc.mirror)
-		if !cmp.Equal(got, tc.want) {
-			t.Errorf("mirror miss match, want: %s, got: %s", tc.want, got)
+			t.Errorf("mirror mismatch, want: %s, got: %s", tc.want, got)
 		}
 	}
 

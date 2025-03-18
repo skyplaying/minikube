@@ -36,8 +36,8 @@ import (
 )
 
 func TestShouldCheckURLVersion(t *testing.T) {
-	tempDir := tests.MakeTempDir()
-	defer tests.RemoveTempDir(tempDir)
+	viper.Set("interactive", true)
+	tempDir := tests.MakeTempDir(t)
 
 	lastUpdateCheckFilePath := filepath.Join(tempDir, "last_update_check")
 
@@ -75,8 +75,8 @@ func TestShouldCheckURLVersion(t *testing.T) {
 }
 
 func TestShouldCheckURLBetaVersion(t *testing.T) {
-	tempDir := tests.MakeTempDir()
-	defer tests.RemoveTempDir(tempDir)
+	viper.Set("interactive", true)
+	tempDir := tests.MakeTempDir(t)
 
 	lastUpdateCheckFilePath := filepath.Join(tempDir, "last_update_check")
 	viper.Set(config.WantUpdateNotification, true)
@@ -95,10 +95,10 @@ func TestShouldCheckURLBetaVersion(t *testing.T) {
 }
 
 type URLHandlerCorrect struct {
-	releases Releases
+	releases []Release
 }
 
-func (h *URLHandlerCorrect) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *URLHandlerCorrect) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	b, err := json.Marshal(h.releases)
 	if err != nil {
 		fmt.Println(err)
@@ -122,7 +122,7 @@ func TestLatestVersionFromURLCorrect(t *testing.T) {
 
 	latestVersion, err := latestVersionFromURL(server.URL)
 	if err != nil {
-		t.Fatalf(err.Error())
+		t.Fatal(err.Error())
 	}
 	expectedVersion, _ := semver.Make(versionFromURL)
 	if latestVersion.Compare(expectedVersion) != 0 {
@@ -132,7 +132,7 @@ func TestLatestVersionFromURLCorrect(t *testing.T) {
 
 type URLHandlerNone struct{}
 
-func (h *URLHandlerNone) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *URLHandlerNone) ServeHTTP(_ http.ResponseWriter, _ *http.Request) {
 }
 
 func TestLatestVersionFromURLNone(t *testing.T) {
@@ -148,7 +148,7 @@ func TestLatestVersionFromURLNone(t *testing.T) {
 
 type URLHandlerMalformed struct{}
 
-func (h *URLHandlerMalformed) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *URLHandlerMalformed) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/javascript")
 	fmt.Fprintf(w, "Malformed JSON")
 }
@@ -169,8 +169,7 @@ var mockLatestVersionFromURL = semver.Make
 func TestMaybePrintUpdateText(t *testing.T) {
 	latestVersionFromURL = mockLatestVersionFromURL
 
-	tempDir := tests.MakeTempDir()
-	defer tests.RemoveTempDir(tempDir)
+	tempDir := tests.MakeTempDir(t)
 
 	var tc = []struct {
 		wantUpdateNotification     bool

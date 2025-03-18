@@ -49,6 +49,13 @@ func StopHost(api libmachine.API, machineName string) error {
 // stop forcibly stops a host without needing to load
 func stop(h *host.Host) error {
 	start := time.Now()
+
+	if driver.IsVM(h.DriverName) {
+		if err := backup(*h, []string{"/etc/cni", "/etc/kubernetes"}); err != nil {
+			klog.Warningf("failed to complete vm config backup (will continue): %v", err)
+		}
+	}
+
 	if driver.NeedsShutdown(h.DriverName) {
 		if err := trySSHPowerOff(h); err != nil {
 			return errors.Wrap(err, "ssh power off")
@@ -64,7 +71,8 @@ func stop(h *host.Host) error {
 		}
 		return &retry.RetriableError{Err: errors.Wrap(err, "stop")}
 	}
-	klog.Infof("duration metric: stop complete within %s", time.Since(start))
+
+	klog.Infof("duration metric: took %s to stop", time.Since(start))
 	return nil
 }
 
@@ -82,7 +90,7 @@ func trySSHPowerOff(h *host.Host) error {
 
 	register.Reg.SetStep(register.PowerOff)
 	out.Step(style.Shutdown, `Powering off "{{.profile_name}}" via SSH ...`, out.V{"profile_name": h.Name})
-	// differnet for kic because RunSSHCommand is not implemented by kic
+	// different for kic because RunSSHCommand is not implemented by kic
 	if driver.IsKIC(h.DriverName) {
 		err := oci.ShutDown(h.DriverName, h.Name)
 		klog.Infof("shutdown container: err=%v", err)

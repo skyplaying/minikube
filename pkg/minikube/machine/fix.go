@@ -24,7 +24,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/machine/drivers/virtualbox"
 	"github.com/docker/machine/libmachine"
 	"github.com/docker/machine/libmachine/host"
 	"github.com/docker/machine/libmachine/state"
@@ -54,12 +53,12 @@ func fixHost(api libmachine.API, cc *config.ClusterConfig, n *config.Node) (*hos
 	start := time.Now()
 	klog.Infof("fixHost starting: %s", n.Name)
 	defer func() {
-		klog.Infof("fixHost completed within %s", time.Since(start))
+		klog.Infof("duration metric: took %s for fixHost", time.Since(start))
 	}()
 
 	h, err := api.Load(config.MachineName(*cc, *n))
 	if err != nil {
-		return h, errors.Wrap(err, "Error loading existing host. Please try running [minikube delete], then run [minikube start] again.")
+		return h, errors.Wrap(err, "error loading existing host. Please try running [minikube delete], then run [minikube start] again")
 	}
 	defer postStartValidations(h, cc.Driver)
 
@@ -74,7 +73,7 @@ func fixHost(api libmachine.API, cc *config.ClusterConfig, n *config.Node) (*hos
 	}
 
 	// Avoid reprovisioning "none" driver because provision.Detect requires SSH
-	if !driver.BareMetal(h.Driver.DriverName()) {
+	if !driver.BareMetal(driverName) {
 		e := engineOptions(*cc)
 		h.HostOptions.EngineOptions.Env = e.Env
 		err = provisionDockerMachine(h)
@@ -91,12 +90,17 @@ func fixHost(api libmachine.API, cc *config.ClusterConfig, n *config.Node) (*hos
 		return h, errors.Wrap(err, "post-start")
 	}
 
-	if driver.BareMetal(h.Driver.DriverName()) {
-		klog.Infof("%s is local, skipping auth/time setup (requires ssh)", driverName)
-		return h, nil
+	// on vm node restart and for ha (multi-control plane) topology only (for now),
+	// we deliberately aim to restore backed up machine config early,
+	// so that remaining code logic can amend files as needed,
+	// it's intentionally non-fatal in case of any error
+	if driver.IsVM(h.DriverName) && config.IsHA(*cc) {
+		if err := restore(*h); err != nil {
+			klog.Warningf("cannot read backup folder, skipping restore: %v", err)
+		}
 	}
 
-	return h, ensureSyncedGuestClock(h, driverName)
+	return h, nil
 }
 
 func recreateIfNeeded(api libmachine.API, cc *config.ClusterConfig, n *config.Node, h *host.Host) (*host.Host, error) {
@@ -156,7 +160,7 @@ func recreateIfNeeded(api libmachine.API, cc *config.ClusterConfig, n *config.No
 	return h, nil
 }
 
-// maybeWarnAboutEvalEnv wil warn user if they need to re-eval their docker-env, podman-env
+// maybeWarnAboutEvalEnv will warn user if they need to re-eval their docker-env, podman-env
 // because docker changes the allocated bind ports after restart https://github.com/kubernetes/minikube/issues/6824
 func maybeWarnAboutEvalEnv(drver string, name string) {
 	if !driver.IsKIC(drver) {
@@ -182,7 +186,7 @@ func maybeWarnAboutEvalEnv(drver string, name string) {
 	}
 }
 
-// ensureGuestClockSync ensures that the guest system clock is relatively in-sync
+// ensureSyncedGuestClock ensures that the guest system clock is relatively in-sync
 func ensureSyncedGuestClock(h hostRunner, drv string) error {
 	if !driver.IsVM(drv) {
 		return nil
@@ -226,7 +230,7 @@ func guestClockDelta(h hostRunner, local time.Time) (time.Duration, error) {
 	return d, nil
 }
 
-// adjustSystemClock adjusts the guest system clock to be nearer to the host system clock
+// adjustGuestClock adjusts the guest system clock to be nearer to the host system clock
 func adjustGuestClock(h hostRunner, t time.Time) error {
 	out, err := h.RunSSHCommand(fmt.Sprintf("sudo date -s @%d", t.Unix()))
 	klog.Infof("clock set: %s (err=%v)", out, err)
@@ -235,15 +239,6 @@ func adjustGuestClock(h hostRunner, t time.Time) error {
 
 func machineExistsState(s state.State, err error) (bool, error) {
 	if s == state.None {
-		return false, constants.ErrMachineMissing
-	}
-	return true, err
-}
-
-func machineExistsError(s state.State, err error, drverr error) (bool, error) {
-	_ = s // not used
-	if err == drverr {
-		// if the error matches driver error
 		return false, constants.ErrMachineMissing
 	}
 	return true, err
@@ -286,10 +281,8 @@ func machineExists(d string, s state.State, err error) (bool, error) {
 	case driver.Parallels:
 		return machineExistsMessage(s, err, "connection is shut down")
 	case driver.VirtualBox:
-		return machineExistsError(s, err, virtualbox.ErrMachineNotExist)
+		return machineExistsMessage(s, err, "machine does not exist")
 	case driver.VMware:
-		return machineExistsState(s, err)
-	case driver.VMwareFusion:
 		return machineExistsState(s, err)
 	case driver.Docker:
 		return machineExistsDocker(s, err)

@@ -89,16 +89,19 @@ minikube start --extra-config=kubeadm.ignore-preflight-errors=SystemVerification
 
 ## Runtime configuration
 
-The default container runtime in minikube is Docker. You can select it explicitly by using:
+The default container runtime in minikube varies. You can select one explicitly by using:
 
 ```shell
 minikube start --container-runtime=docker
 ```
 
-Other options available are:
+Options available are:
 
-* [containerd](https://github.com/containerd/containerd)
-* [cri-o](https://github.com/cri-o/cri-o)
+* [containerd]({{<ref "/docs/runtimes/containerd">}})
+* [cri-o]({{<ref "/docs/runtimes/cri-o">}})
+* [docker]({{<ref "/docs/runtimes/docker">}})
+
+See <https://kubernetes.io/docs/setup/production-environment/container-runtimes/>
 
 ## Environment variables
 
@@ -110,7 +113,7 @@ For example the `minikube start --iso-url="$ISO_URL"` flag can also be set by se
 
 Some features can only be accessed by minikube specific environment variables, here is a list of these features:
 
-* **MINIKUBE_HOME** - (string) sets the path for the .minikube directory that minikube uses for state/configuration. *Please note: this is used only by minikube and does not affect anything related to Kubernetes tools such as kubectl.*
+* **MINIKUBE_HOME** - (string) sets the path for the .minikube directory that minikube uses for state/configuration. If you specify it to `/path/to/somewhere` and `somewhere` is not equal to `.minikube`, the final MINIKUBE_HOME will be `/path/to/somewhere/.minikube`. Defaults to `~/.minikube` if unspecified. *Please note: this is used only by minikube and does not affect anything related to Kubernetes tools such as kubectl.*
 
 * **MINIKUBE_IN_STYLE** - (bool) manually sets whether or not emoji and colors should appear in minikube. Set to false or 0 to disable this feature, true or 1 to force it to be turned on.
 

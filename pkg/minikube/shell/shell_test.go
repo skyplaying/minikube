@@ -110,7 +110,7 @@ set -e bar;`},
 			var b bytes.Buffer
 
 			if err := UnsetScript(tc.ec, &b, tc.vars); err != nil {
-				t.Fatalf("Unexpected error when unseting script happen: %v", err)
+				t.Fatalf("Unexpected error when unsetting script happen: %v", err)
 			} else {
 				writtenMessage := strings.TrimSpace(b.String())
 				expected := strings.TrimSpace(tc.expected)
@@ -123,10 +123,7 @@ set -e bar;`},
 }
 
 func TestDetectSet(t *testing.T) {
-	orgShellEnv := os.Getenv("SHELL")
-	defer os.Setenv("SHELL", orgShellEnv)
-
-	os.Setenv("SHELL", "/bin/bash")
+	t.Setenv("SHELL", "/bin/bash")
 	if s, err := Detect(); err != nil {
 		t.Fatalf("unexpected error: '%v' during shell detection. Returned shell: %s", err, s)
 	} else if s == "" {
@@ -147,15 +144,11 @@ func TestDetectUnset(t *testing.T) {
 }
 
 func TestSetScript(t *testing.T) {
-	ec := EnvConfig{"bash"}
 	var w bytes.Buffer
-	if err := SetScript(ec, &w, "foo", nil); err != nil {
+	if err := SetScript(&w, "foo", nil); err != nil {
 		t.Fatalf("Unexpected error: '%v' during Setting script", err)
 	}
 	if w.String() != "foo" {
 		t.Fatalf("Expected foo writed by SetScript, but got '%v'", w.String())
-	}
-	if ec.Shell == "" {
-		t.Fatalf("Expected no empty shell")
 	}
 }

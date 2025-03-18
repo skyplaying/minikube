@@ -14,16 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-/*
-Script expects the following env variables:
- - UPDATE_TARGET=<string>: optional - if unset/absent, default option is "fs"; valid options are:
-   - "fs"  - update only local filesystem repo files [default]
-   - "gh"  - update only remote GitHub repo files and create PR (if one does not exist already)
-   - "all" - update local and remote repo files and create PR (if one does not exist already)
- - GITHUB_TOKEN=<string>: GitHub [personal] access token
-   - note: GITHUB_TOKEN is required if UPDATE_TARGET is "gh" or "all"
-*/
-
 package main
 
 import (
@@ -35,11 +25,12 @@ import (
 	"k8s.io/klog/v2"
 
 	"k8s.io/minikube/hack/update"
+	"k8s.io/minikube/pkg/minikube/constants"
 )
 
 const (
 	// default context timeout
-	cxTimeout = 300 * time.Second
+	cxTimeout = 5 * time.Minute
 )
 
 var (
@@ -57,74 +48,71 @@ var (
 			},
 		},
 		"pkg/minikube/bootstrapper/bsutil/testdata/{{.LatestVersionMM}}/containerd-api-port.yaml": {
-			Content: update.Loadf("templates/v1beta2/containerd-api-port.yaml"),
+			Content: update.Loadf("templates/v1beta4/containerd-api-port.yaml"),
 			Replace: map[string]string{
 				`kubernetesVersion:.*`: `kubernetesVersion: {{.LatestVersionP0}}`,
 			},
 		},
 		"pkg/minikube/bootstrapper/bsutil/testdata/{{.LatestVersionMM}}/containerd-pod-network-cidr.yaml": {
-			Content: update.Loadf("templates/v1beta2/containerd-pod-network-cidr.yaml"),
+			Content: update.Loadf("templates/v1beta4/containerd-pod-network-cidr.yaml"),
 			Replace: map[string]string{
 				`kubernetesVersion:.*`: `kubernetesVersion: {{.LatestVersionP0}}`,
 			},
 		},
 		"pkg/minikube/bootstrapper/bsutil/testdata/{{.LatestVersionMM}}/containerd.yaml": {
-			Content: update.Loadf("templates/v1beta2/containerd.yaml"),
+			Content: update.Loadf("templates/v1beta4/containerd.yaml"),
 			Replace: map[string]string{
 				`kubernetesVersion:.*`: `kubernetesVersion: {{.LatestVersionP0}}`,
 			},
 		},
 		"pkg/minikube/bootstrapper/bsutil/testdata/{{.LatestVersionMM}}/crio-options-gates.yaml": {
-			Content: update.Loadf("templates/v1beta2/crio-options-gates.yaml"),
+			Content: update.Loadf("templates/v1beta4/crio-options-gates.yaml"),
 			Replace: map[string]string{
 				`kubernetesVersion:.*`: `kubernetesVersion: {{.LatestVersionP0}}`,
 			},
 		},
 		"pkg/minikube/bootstrapper/bsutil/testdata/{{.LatestVersionMM}}/crio.yaml": {
-			Content: update.Loadf("templates/v1beta2/crio.yaml"),
+			Content: update.Loadf("templates/v1beta4/crio.yaml"),
 			Replace: map[string]string{
 				`kubernetesVersion:.*`: `kubernetesVersion: {{.LatestVersionP0}}`,
 			},
 		},
 		"pkg/minikube/bootstrapper/bsutil/testdata/{{.LatestVersionMM}}/default.yaml": {
-			Content: update.Loadf("templates/v1beta2/default.yaml"),
+			Content: update.Loadf("templates/v1beta4/default.yaml"),
 			Replace: map[string]string{
 				`kubernetesVersion:.*`: `kubernetesVersion: {{.LatestVersionP0}}`,
 			},
 		},
 		"pkg/minikube/bootstrapper/bsutil/testdata/{{.LatestVersionMM}}/dns.yaml": {
-			Content: update.Loadf("templates/v1beta2/dns.yaml"),
+			Content: update.Loadf("templates/v1beta4/dns.yaml"),
 			Replace: map[string]string{
 				`kubernetesVersion:.*`: `kubernetesVersion: {{.LatestVersionP0}}`,
 			},
 		},
 		"pkg/minikube/bootstrapper/bsutil/testdata/{{.LatestVersionMM}}/image-repository.yaml": {
-			Content: update.Loadf("templates/v1beta2/image-repository.yaml"),
+			Content: update.Loadf("templates/v1beta4/image-repository.yaml"),
 			Replace: map[string]string{
 				`kubernetesVersion:.*`: `kubernetesVersion: {{.LatestVersionP0}}`,
 			},
 		},
 		"pkg/minikube/bootstrapper/bsutil/testdata/{{.LatestVersionMM}}/options.yaml": {
-			Content: update.Loadf("templates/v1beta2/options.yaml"),
+			Content: update.Loadf("templates/v1beta4/options.yaml"),
 			Replace: map[string]string{
 				`kubernetesVersion:.*`: `kubernetesVersion: {{.LatestVersionP0}}`,
 			},
 		},
 	}
-
-	// PR data
-	prBranchPrefix = "update-kubernetes-version_" // will be appended with first 7 characters of the PR commit SHA
-	prTitle        = `update_kubernetes_version: {stable: "{{.StableVersion}}", latest: "{{.LatestVersion}}"}`
-	prIssue        = 4392
 )
 
 // Data holds greatest current stable release and greatest latest rc or beta pre-release Kubernetes versions
 type Data struct {
-	StableVersion   string `json:"StableVersion"`
-	LatestVersion   string `json:"LatestVersion"`
-	LatestVersionMM string `json:"LatestVersionMM"` // LatestVersion in <major>.<minor> format
+	StableVersion   string
+	LatestVersion   string
+	LatestVersionMM string // LatestVersion in <major>.<minor> format
 	// for testdata: if StableVersion greater than 'LatestVersionMM.0' exists, LatestVersionP0 is 'LatestVersionMM.0', otherwise LatestVersionP0 is LatestVersion.
-	LatestVersionP0 string `json:"LatestVersionP0"`
+	LatestVersionP0  string
+	CurrentVersionMM string
+	CurrentVersionP0 string
 }
 
 func main() {
@@ -139,16 +127,20 @@ func main() {
 	}
 	data := Data{StableVersion: stable, LatestVersion: latest, LatestVersionMM: latestMM, LatestVersionP0: latestP0}
 
-	// Print PR title for Github action.
+	updateCurrentTestDataFiles(latestMM, &data)
+
+	// Print PR title for GitHub action.
 	fmt.Printf("Bump Kubernetes version default: %s and latest: %s\n", data.StableVersion, data.LatestVersion)
 
-	update.Apply(ctx, schema, data, prBranchPrefix, prTitle, prIssue)
+	update.Apply(schema, data)
 }
 
-// k8sVersion returns Kubernetes versions.
+// k8sVersions returns Kubernetes versions.
 func k8sVersions(ctx context.Context, owner, repo string) (stable, latest, latestMM, latestP0 string, err error) {
 	// get Kubernetes versions from GitHub Releases
-	stable, latest, _, err = update.GHReleases(ctx, owner, repo)
+	stableRls, latestRls, _, err := update.GHReleases(ctx, owner, repo)
+	stable = stableRls.Tag
+	latest = latestRls.Tag
 	if err != nil || !semver.IsValid(stable) || !semver.IsValid(latest) {
 		return "", "", "", "", err
 	}
@@ -158,4 +150,81 @@ func k8sVersions(ctx context.Context, owner, repo string) (stable, latest, lates
 		latestP0 = latest
 	}
 	return stable, latest, latestMM, latestP0, nil
+}
+
+// updateCurrentTestDataFiles the point of this function it to update the testdata files for the current `NewestKubernetesVersion`
+// otherwise, we can run into an issue where there's a new Kubernetes minor version, so the existing testdata files are ignored
+// but they're not ending in `.0` and are potentially ending with a prerelease tag such as `v1.29.0-rc.2`, resulting in the unit
+// tests failing and requiring manual intervention to correct the testdata files.
+func updateCurrentTestDataFiles(latestMM string, data *Data) {
+	currentMM := semver.MajorMinor(constants.NewestKubernetesVersion)
+
+	// if we're still on the same version, skip and we're already going to update these testdata files
+	if currentMM == latestMM {
+		return
+	}
+
+	data.CurrentVersionMM = currentMM
+	data.CurrentVersionP0 = currentMM + ".0"
+
+	currentSchema := map[string]update.Item{
+		"pkg/minikube/bootstrapper/bsutil/testdata/{{.CurrentVersionMM}}/containerd-api-port.yaml": {
+			Content: update.Loadf("templates/v1beta4/containerd-api-port.yaml"),
+			Replace: map[string]string{
+				`kubernetesVersion:.*`: `kubernetesVersion: {{.CurrentVersionP0}}`,
+			},
+		},
+		"pkg/minikube/bootstrapper/bsutil/testdata/{{.CurrentVersionMM}}/containerd-pod-network-cidr.yaml": {
+			Content: update.Loadf("templates/v1beta4/containerd-pod-network-cidr.yaml"),
+			Replace: map[string]string{
+				`kubernetesVersion:.*`: `kubernetesVersion: {{.CurrentVersionP0}}`,
+			},
+		},
+		"pkg/minikube/bootstrapper/bsutil/testdata/{{.CurrentVersionMM}}/containerd.yaml": {
+			Content: update.Loadf("templates/v1beta4/containerd.yaml"),
+			Replace: map[string]string{
+				`kubernetesVersion:.*`: `kubernetesVersion: {{.CurrentVersionP0}}`,
+			},
+		},
+		"pkg/minikube/bootstrapper/bsutil/testdata/{{.CurrentVersionMM}}/crio-options-gates.yaml": {
+			Content: update.Loadf("templates/v1beta4/crio-options-gates.yaml"),
+			Replace: map[string]string{
+				`kubernetesVersion:.*`: `kubernetesVersion: {{.CurrentVersionP0}}`,
+			},
+		},
+		"pkg/minikube/bootstrapper/bsutil/testdata/{{.CurrentVersionMM}}/crio.yaml": {
+			Content: update.Loadf("templates/v1beta4/crio.yaml"),
+			Replace: map[string]string{
+				`kubernetesVersion:.*`: `kubernetesVersion: {{.CurrentVersionP0}}`,
+			},
+		},
+		"pkg/minikube/bootstrapper/bsutil/testdata/{{.CurrentVersionMM}}/default.yaml": {
+			Content: update.Loadf("templates/v1beta4/default.yaml"),
+			Replace: map[string]string{
+				`kubernetesVersion:.*`: `kubernetesVersion: {{.CurrentVersionP0}}`,
+			},
+		},
+		"pkg/minikube/bootstrapper/bsutil/testdata/{{.CurrentVersionMM}}/dns.yaml": {
+			Content: update.Loadf("templates/v1beta4/dns.yaml"),
+			Replace: map[string]string{
+				`kubernetesVersion:.*`: `kubernetesVersion: {{.CurrentVersionP0}}`,
+			},
+		},
+		"pkg/minikube/bootstrapper/bsutil/testdata/{{.CurrentVersionMM}}/image-repository.yaml": {
+			Content: update.Loadf("templates/v1beta4/image-repository.yaml"),
+			Replace: map[string]string{
+				`kubernetesVersion:.*`: `kubernetesVersion: {{.CurrentVersionP0}}`,
+			},
+		},
+		"pkg/minikube/bootstrapper/bsutil/testdata/{{.CurrentVersionMM}}/options.yaml": {
+			Content: update.Loadf("templates/v1beta4/options.yaml"),
+			Replace: map[string]string{
+				`kubernetesVersion:.*`: `kubernetesVersion: {{.CurrentVersionP0}}`,
+			},
+		},
+	}
+
+	for k, v := range currentSchema {
+		schema[k] = v
+	}
 }

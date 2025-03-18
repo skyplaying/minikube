@@ -23,39 +23,42 @@ import (
 	"strconv"
 	"strings"
 
-	"k8s.io/minikube/pkg/minikube/bootstrapper/bsutil/kverify"
+	"k8s.io/minikube/pkg/minikube/cluster"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/constants"
-	"k8s.io/minikube/pkg/minikube/driver"
 	"k8s.io/minikube/pkg/minikube/exit"
 	"k8s.io/minikube/pkg/minikube/machine"
+	"k8s.io/minikube/pkg/minikube/notify"
 	"k8s.io/minikube/pkg/minikube/out"
 	"k8s.io/minikube/pkg/minikube/reason"
 	"k8s.io/minikube/pkg/minikube/style"
 
 	"github.com/docker/machine/libmachine"
-	"github.com/docker/machine/libmachine/state"
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 
 	"k8s.io/klog/v2"
 )
 
-var output string
+var profileOutput string
 var isLight bool
 
 var profileListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "Lists all minikube profiles.",
 	Long:  "Lists all valid minikube profiles and detects all possible invalid profiles.",
-	Run: func(cmd *cobra.Command, args []string) {
-		switch strings.ToLower(output) {
+	Run: func(_ *cobra.Command, _ []string) {
+		output := strings.ToLower(profileOutput)
+		out.SetJSON(output == "json")
+		go notify.MaybePrintUpdateTextFromGithub()
+
+		switch output {
 		case "json":
 			printProfilesJSON()
 		case "table":
 			printProfilesTable()
 		default:
-			exit.Message(reason.Usage, fmt.Sprintf("invalid output format: %s. Valid values: 'table', 'json'", output))
+			exit.Message(reason.Usage, fmt.Sprintf("invalid output format: %s. Valid values: 'table', 'json'", profileOutput))
 		}
 	},
 }
@@ -78,7 +81,7 @@ func printProfilesTable() {
 	}
 
 	if len(validProfiles) == 0 {
-		exit.Message(reason.UsageNoProfileRunning, "No minikube profile was found. ")
+		exit.Message(reason.UsageNoProfileRunning, "No minikube profile was found.")
 	}
 
 	updateProfilesStatus(validProfiles)
@@ -101,55 +104,33 @@ func updateProfilesStatus(profiles []*config.Profile) {
 	defer api.Close()
 
 	for _, p := range profiles {
-		p.Status = profileStatus(p, api)
+		p.Status = profileStatus(p, api).StatusName
 	}
 }
 
-func profileStatus(p *config.Profile, api libmachine.API) string {
-	cp, err := config.PrimaryControlPlane(p.Config)
-	if err != nil {
-		exit.Error(reason.GuestCpConfig, "error getting primary control plane", err)
+func profileStatus(p *config.Profile, api libmachine.API) cluster.State {
+	cps := config.ControlPlanes(*p.Config)
+	if len(cps) == 0 {
+		exit.Message(reason.GuestCpConfig, "No control-plane nodes found.")
 	}
+	statuses, err := cluster.GetStatus(api, p.Config)
+	if err != nil {
+		klog.Errorf("error getting statuses: %v", err)
+		return cluster.State{
+			BaseState: cluster.BaseState{
+				Name:       "Unknown",
+				StatusCode: 520,
+			},
+		}
+	}
+	clusterStatus := cluster.GetState(statuses, ClusterFlagValue(), p.Config)
 
-	host, err := machine.LoadHost(api, config.MachineName(*p.Config, cp))
-	if err != nil {
-		klog.Warningf("error loading profiles: %v", err)
-		return "Unknown"
-	}
-
-	// The machine isn't running, no need to check inside
-	s, err := host.Driver.GetState()
-	if err != nil {
-		klog.Warningf("error getting host state: %v", err)
-		return "Unknown"
-	}
-	if s != state.Running {
-		return s.String()
-	}
-
-	cr, err := machine.CommandRunner(host)
-	if err != nil {
-		klog.Warningf("error loading profiles: %v", err)
-		return "Unknown"
-	}
-
-	hostname, _, port, err := driver.ControlPlaneEndpoint(p.Config, &cp, host.DriverName)
-	if err != nil {
-		klog.Warningf("error loading profiles: %v", err)
-		return "Unknown"
-	}
-
-	status, err := kverify.APIServerStatus(cr, hostname, port)
-	if err != nil {
-		klog.Warningf("error getting apiserver status for %s: %v", p.Name, err)
-		return "Unknown"
-	}
-	return status.String()
+	return clusterStatus
 }
 
 func renderProfilesTable(ps [][]string) {
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Profile", "VM Driver", "Runtime", "IP", "Port", "Version", "Status", "Nodes"})
+	table.SetHeader([]string{"Profile", "VM Driver", "Runtime", "IP", "Port", "Version", "Status", "Nodes", "Active Profile", "Active Kubecontext"})
 	table.SetAutoFormatHeaders(false)
 	table.SetBorders(tablewriter.Border{Left: true, Top: true, Right: true, Bottom: true})
 	table.SetCenterSeparator("|")
@@ -159,17 +140,31 @@ func renderProfilesTable(ps [][]string) {
 
 func profilesToTableData(profiles []*config.Profile) [][]string {
 	var data [][]string
+	currentProfile := ClusterFlagValue()
 	for _, p := range profiles {
-		cp, err := config.PrimaryControlPlane(p.Config)
-		if err != nil {
-			exit.Error(reason.GuestCpConfig, "error getting primary control plane", err)
+		cpIP := p.Config.KubernetesConfig.APIServerHAVIP
+		cpPort := p.Config.APIServerPort
+		if !config.IsHA(*p.Config) {
+			cp, err := config.ControlPlane(*p.Config)
+			if err != nil {
+				exit.Error(reason.GuestCpConfig, "error getting control-plane node", err)
+			}
+			cpIP = cp.IP
+			cpPort = cp.Port
 		}
 
 		k8sVersion := p.Config.KubernetesConfig.KubernetesVersion
 		if k8sVersion == constants.NoKubernetesVersion { // for --no-kubernetes flag
 			k8sVersion = "N/A"
 		}
-		data = append(data, []string{p.Name, p.Config.Driver, p.Config.KubernetesConfig.ContainerRuntime, cp.IP, strconv.Itoa(cp.Port), k8sVersion, p.Status, strconv.Itoa(len(p.Config.Nodes))})
+		var c, k string
+		if p.Name == currentProfile {
+			c = "*"
+		}
+		if p.ActiveKubeContext {
+			k = "*"
+		}
+		data = append(data, []string{p.Name, p.Config.Driver, p.Config.KubernetesConfig.ContainerRuntime, cpIP, strconv.Itoa(cpPort), k8sVersion, p.Status, strconv.Itoa(len(p.Config.Nodes)), c, k})
 	}
 	return data
 }
@@ -186,13 +181,12 @@ func warnInvalidProfiles(invalidProfiles []*config.Profile) {
 
 	out.ErrT(style.Tip, "You can delete them using the following command(s): ")
 	for _, p := range invalidProfiles {
-		out.Err(fmt.Sprintf("\t $ minikube delete -p %s \n", p.Name))
+		out.Errf("\t $ minikube delete -p %s \n", p.Name)
 	}
 }
 
 func printProfilesJSON() {
 	validProfiles, invalidProfiles, err := listProfiles()
-
 	updateProfilesStatus(validProfiles)
 
 	var body = map[string]interface{}{}
@@ -200,11 +194,11 @@ func printProfilesJSON() {
 		body["valid"] = profilesOrDefault(validProfiles)
 		body["invalid"] = profilesOrDefault(invalidProfiles)
 		jsonString, _ := json.Marshal(body)
-		out.String(string(jsonString))
+		os.Stdout.Write(jsonString)
 	} else {
 		body["error"] = err
 		jsonString, _ := json.Marshal(body)
-		out.String(string(jsonString))
+		os.Stdout.Write(jsonString)
 		os.Exit(reason.ExGuestError)
 	}
 }
@@ -217,7 +211,7 @@ func profilesOrDefault(profiles []*config.Profile) []*config.Profile {
 }
 
 func init() {
-	profileListCmd.Flags().StringVarP(&output, "output", "o", "table", "The output format. One of 'json', 'table'")
+	profileListCmd.Flags().StringVarP(&profileOutput, "output", "o", "table", "The output format. One of 'json', 'table'")
 	profileListCmd.Flags().BoolVarP(&isLight, "light", "l", false, "If true, returns list of profiles faster by skipping validating the status of the cluster.")
 	ProfileCmd.AddCommand(profileListCmd)
 }

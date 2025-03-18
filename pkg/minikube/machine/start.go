@@ -28,12 +28,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blang/semver/v4"
 	"github.com/docker/machine/libmachine"
 	"github.com/docker/machine/libmachine/drivers"
 	"github.com/docker/machine/libmachine/engine"
 	"github.com/docker/machine/libmachine/host"
-	"github.com/juju/mutex"
+	"github.com/juju/mutex/v2"
 	"github.com/pkg/errors"
+	"github.com/spf13/viper"
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/drivers/kic/oci"
 	"k8s.io/minikube/pkg/minikube/command"
@@ -49,6 +51,7 @@ import (
 	"k8s.io/minikube/pkg/minikube/registry"
 	"k8s.io/minikube/pkg/minikube/style"
 	"k8s.io/minikube/pkg/minikube/vmpath"
+	"k8s.io/minikube/pkg/util"
 	"k8s.io/minikube/pkg/util/lock"
 )
 
@@ -85,14 +88,18 @@ func StartHost(api libmachine.API, cfg *config.ClusterConfig, n *config.Node) (*
 	if err != nil {
 		return nil, false, errors.Wrapf(err, "exists: %s", machineName)
 	}
+	var h *host.Host
 	if !exists {
 		klog.Infof("Provisioning new machine with config: %+v %+v", cfg, n)
-		h, err := createHost(api, cfg, n)
+		h, err = createHost(api, cfg, n)
+	} else {
+		klog.Infoln("Skipping create...Using existing machine configuration")
+		h, err = fixHost(api, cfg, n)
+	}
+	if err != nil {
 		return h, exists, err
 	}
-	klog.Infoln("Skipping create...Using existing machine configuration")
-	h, err := fixHost(api, cfg, n)
-	return h, exists, err
+	return h, exists, ensureSyncedGuestClock(h, cfg.Driver)
 }
 
 // engineOptions returns docker engine options for the dockerd running inside minikube
@@ -102,15 +109,7 @@ func engineOptions(cfg config.ClusterConfig) *engine.Options {
 	// get docker env from user specifiec config
 	dockerEnv = append(dockerEnv, cfg.DockerEnv...)
 
-	// remove duplicates
-	seen := map[string]bool{}
-	uniqueEnvs := []string{}
-	for e := range dockerEnv {
-		if !seen[dockerEnv[e]] {
-			seen[dockerEnv[e]] = true
-			uniqueEnvs = append(uniqueEnvs, dockerEnv[e])
-		}
-	}
+	uniqueEnvs := util.RemoveDuplicateStrings(dockerEnv)
 
 	o := engine.Options{
 		Env:              uniqueEnvs,
@@ -126,7 +125,7 @@ func createHost(api libmachine.API, cfg *config.ClusterConfig, n *config.Node) (
 	klog.Infof("createHost starting for %q (driver=%q)", n.Name, cfg.Driver)
 	start := time.Now()
 	defer func() {
-		klog.Infof("duration metric: createHost completed in %s", time.Since(start))
+		klog.Infof("duration metric: took %s to createHost", time.Since(start))
 	}()
 
 	if cfg.Driver != driver.SSH {
@@ -165,7 +164,7 @@ func createHost(api libmachine.API, cfg *config.ClusterConfig, n *config.Node) (
 	if err := timedCreateHost(h, api, cfg.StartHostTimeout); err != nil {
 		return nil, errors.Wrap(err, "creating host")
 	}
-	klog.Infof("duration metric: libmachine.API.Create for %q took %s", cfg.Name, time.Since(cstart))
+	klog.Infof("duration metric: took %s to libmachine.API.Create %q", time.Since(cstart), cfg.Name)
 	if cfg.Driver == driver.SSH {
 		showHostInfo(h, *cfg)
 	}
@@ -181,28 +180,21 @@ func createHost(api libmachine.API, cfg *config.ClusterConfig, n *config.Node) (
 }
 
 func timedCreateHost(h *host.Host, api libmachine.API, t time.Duration) error {
-	timeout := make(chan bool, 1)
+	create := make(chan error, 1)
 	go func() {
-		time.Sleep(t)
-		timeout <- true
-	}()
-
-	createFinished := make(chan bool, 1)
-	var err error
-	go func() {
-		err = api.Create(h)
-		createFinished <- true
+		defer close(create)
+		create <- api.Create(h)
 	}()
 
 	select {
-	case <-createFinished:
+	case err := <-create:
 		if err != nil {
 			// Wait for all the logs to reach the client
 			time.Sleep(2 * time.Second)
 			return errors.Wrap(err, "create")
 		}
 		return nil
-	case <-timeout:
+	case <-time.After(t):
 		return fmt.Errorf("create host timed out in %f seconds", t.Seconds())
 	}
 }
@@ -233,17 +225,36 @@ func postStartValidations(h *host.Host, drvName string) {
 		return
 	}
 
+	if viper.GetBool("force") {
+		return
+	}
+
 	// make sure /var isn't full,  as pod deployments will fail if it is
 	percentageFull, err := DiskUsed(r, "/var")
 	if err != nil {
 		klog.Warningf("error getting percentage of /var that is free: %v", err)
 	}
-	if percentageFull >= 99 {
-		exit.Message(kind, `{{.n}} is out of disk space! (/var is at {{.p}}% of capacity)`, out.V{"n": name, "p": percentageFull})
+
+	availableGiB, err := DiskAvailable(r, "/var")
+	if err != nil {
+		klog.Warningf("error getting GiB of /var that is available: %v", err)
+	}
+	const thresholdGiB = 20
+
+	if percentageFull >= 99 && availableGiB < thresholdGiB {
+		exit.Message(
+			kind,
+			`{{.n}} is out of disk space! (/var is at {{.p}}% of capacity). You can pass '--force' to skip this check.`,
+			out.V{"n": name, "p": percentageFull},
+		)
 	}
 
-	if percentageFull >= 85 {
-		out.WarnReason(kind, `{{.n}} is nearly out of disk space, which may cause deployments to fail! ({{.p}}% of capacity)`, out.V{"n": name, "p": percentageFull})
+	if percentageFull >= 85 && availableGiB < thresholdGiB {
+		out.WarnReason(
+			kind,
+			`{{.n}} is nearly out of disk space, which may cause deployments to fail! ({{.p}}% of capacity). You can pass '--force' to skip this check.`,
+			out.V{"n": name, "p": percentageFull},
+		)
 	}
 }
 
@@ -262,16 +273,50 @@ func DiskUsed(cr command.Runner, dir string) (int, error) {
 	return strconv.Atoi(percentage)
 }
 
-// postStart are functions shared between startHost and fixHost
+// DiskAvailable returns the available capacity of dir in the VM/container in GiB
+func DiskAvailable(cr command.Runner, dir string) (int, error) {
+	if s := os.Getenv(constants.TestDiskAvailableEnv); s != "" {
+		return strconv.Atoi(s)
+	}
+	output, err := cr.RunCmd(exec.Command("sh", "-c", fmt.Sprintf("df -BG %s | awk 'NR==2{print $4}'", dir)))
+	if err != nil {
+		klog.Warningf("error running df -BG /var: %v\n%v", err, output.Output())
+		return 0, err
+	}
+	gib := strings.TrimSpace(output.Stdout.String())
+	gib = strings.Trim(gib, "G")
+	return strconv.Atoi(gib)
+}
+
+// postStartSetup are functions shared between startHost and fixHost
 func postStartSetup(h *host.Host, mc config.ClusterConfig) error {
-	klog.Infof("post-start starting for %q (driver=%q)", h.Name, h.DriverName)
+	klog.Infof("postStartSetup for %q (driver=%q)", h.Name, h.DriverName)
 	start := time.Now()
 	defer func() {
-		klog.Infof("post-start completed in %s", time.Since(start))
+		klog.Infof("duration metric: took %s for postStartSetup", time.Since(start))
 	}()
 
 	if driver.IsMock(h.DriverName) {
 		return nil
+	}
+
+	k8sVer, err := semver.ParseTolerant(mc.KubernetesConfig.KubernetesVersion)
+	if err != nil {
+		klog.Errorf("unable to parse Kubernetes version: %s", mc.KubernetesConfig.KubernetesVersion)
+		return err
+	}
+	if driver.IsNone(h.DriverName) && k8sVer.GTE(semver.Version{Major: 1, Minor: 24}) {
+		if mc.KubernetesConfig.ContainerRuntime == constants.Docker {
+			if _, err := exec.LookPath("cri-dockerd"); err != nil {
+				exit.Message(reason.NotFoundCriDockerd, "\n\n")
+			}
+			if _, err := exec.LookPath("dockerd"); err != nil {
+				exit.Message(reason.NotFoundDockerd, "\n\n")
+			}
+		}
+		if _, err := os.Stat("/opt/cni/bin"); err != nil {
+			exit.Message(reason.NotFoundCNIPlugins, "\n\n")
+		}
 	}
 
 	klog.Infof("creating required directories: %v", requiredDirectories)
@@ -289,9 +334,11 @@ func postStartSetup(h *host.Host, mc config.ClusterConfig) error {
 	if driver.BareMetal(mc.Driver) {
 		showLocalOsRelease()
 	}
+
 	if driver.IsVM(mc.Driver) || driver.IsKIC(mc.Driver) || driver.IsSSH(mc.Driver) {
 		logRemoteOsRelease(r)
 	}
+
 	return syncLocalAssets(r)
 }
 
@@ -310,11 +357,11 @@ func acquireMachinesLock(name string, drv string) (mutex.Releaser, error) {
 		spec.Timeout = 10 * time.Minute
 	}
 
-	klog.Infof("acquiring machines lock for %s: %+v", name, spec)
+	klog.Infof("acquireMachinesLock for %s: %+v", name, spec)
 	start := time.Now()
 	r, err := mutex.Acquire(spec)
 	if err == nil {
-		klog.Infof("acquired machines lock for %q in %s", name, time.Since(start))
+		klog.Infof("duration metric: took %s to acquireMachinesLock for %q", time.Since(start), name)
 	}
 	return r, err
 }
@@ -345,7 +392,7 @@ func showHostInfo(h *host.Host, cfg config.ClusterConfig) {
 	}
 	if driver.IsKIC(cfg.Driver) { // TODO:medyagh add free disk space on docker machine
 		register.Reg.SetStep(register.CreatingContainer)
-		out.Step(style.StartingVM, "Creating {{.driver_name}} {{.machine_type}} (CPUs={{.number_of_cpus}}, Memory={{.memory_size}}MB) ...", out.V{"driver_name": cfg.Driver, "number_of_cpus": cfg.CPUs, "memory_size": cfg.Memory, "machine_type": machineType})
+		out.Step(style.StartingVM, "Creating {{.driver_name}} {{.machine_type}} (CPUs={{if not .number_of_cpus}}no-limit{{else}}{{.number_of_cpus}}{{end}}, Memory={{if not .memory_size}}no-limit{{else}}{{.memory_size}}MB{{end}}) ...", out.V{"driver_name": cfg.Driver, "number_of_cpus": cfg.CPUs, "memory_size": cfg.Memory, "machine_type": machineType})
 		return
 	}
 	register.Reg.SetStep(register.CreatingVM)

@@ -94,14 +94,14 @@ clusters:
   name: minikube
 contexts:
 - context:
-    cluster: la-croix
-    user: la-croix
-  name: la-croix
-current-context: la-croix
+    cluster: minikube
+    user: minikube
+  name: minikube
+current-context: minikube
 kind: Config
 preferences: {}
 users:
-- name: la-croix
+- name: minikube
   user:
     client-certificate: /home/la-croix/apiserver.crt
     client-key: /home/la-croix/apiserver.key
@@ -116,14 +116,14 @@ clusters:
   name: minikube
 contexts:
 - context:
-    cluster: la-croix
-    user: la-croix
-  name: la-croix
-current-context: la-croix
+    cluster: minikube
+    user: minikube
+  name: minikube
+current-context: minikube
 kind: Config
 preferences: {}
 users:
-- name: la-croix
+- name: minikube
   user:
     client-certificate: /home/la-croix/apiserver.crt
     client-key: /home/la-croix/apiserver.key
@@ -138,14 +138,14 @@ clusters:
   name: minikube
 contexts:
 - context:
-    cluster: la-croix
-    user: la-croix
-  name: la-croix
-current-context: la-croix
+    cluster: minikube
+    user: minikube
+  name: minikube
+current-context: minikube
 kind: Config
 preferences: {}
 users:
-- name: la-croix
+- name: minikube
   user:
     client-certificate: /home/la-croix/apiserver.crt
     client-key: /home/la-croix/apiserver.key
@@ -176,6 +176,70 @@ current-context: minikube
 kind: Config
 preferences: {}
 users:
+- name: minikube
+  user:
+    client-certificate: /home/la-croix/.minikube/profiles/minikube/client.crt
+    client-key: /home/la-croix/.minikube/profiles/minikube/client.key
+`)
+
+var kubeConfigMissingContext = []byte(`
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority: /home/la-croix/apiserver.crt
+    server: https://192.168.10.100:8443
+  name: la-croix
+- cluster:
+    certificate-authority: /home/la-croix/.minikube/ca.crt
+    server: https://192.168.10.100:8080
+  name: minikube
+contexts:
+- context:
+    cluster: la-croix
+    user: la-croix
+  name: la-croix
+current-context: la-croix
+kind: Config
+preferences: {}
+users:
+- name: la-croix
+  user:
+    client-certificate: /home/la-croix/apiserver.crt
+    client-key: /home/la-croix/apiserver.key
+- name: minikube
+  user:
+    client-certificate: /home/la-croix/.minikube/profiles/minikube/client.crt
+    client-key: /home/la-croix/.minikube/profiles/minikube/client.key
+`)
+
+var kubeConfigFixedContext = []byte(`
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority: /home/la-croix/apiserver.crt
+    server: https://192.168.10.100:8443
+  name: la-croix
+- cluster:
+    certificate-authority: /home/la-croix/.minikube/ca.crt
+    server: https://192.168.10.100:8080
+  name: minikube
+contexts:
+- context:
+    cluster: la-croix
+    user: la-croix
+  name: la-croix
+- context:
+    cluster: minikube
+    user: minikube
+  name: minikube
+current-context: minikube
+kind: Config
+preferences: {}
+users:
+- name: la-croix
+  user:
+    client-certificate: /home/la-croix/apiserver.crt
+    client-key: /home/la-croix/apiserver.key
 - name: minikube
   user:
     client-certificate: /home/la-croix/.minikube/profiles/minikube/client.crt
@@ -228,16 +292,7 @@ func TestUpdate(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.description, func(t *testing.T) {
-			tmpDir, err := os.MkdirTemp("", "")
-			if err != nil {
-				t.Fatalf("Error making temp directory %v", err)
-			}
-			defer func() { // clean up tempdir
-				err := os.RemoveAll(tmpDir)
-				if err != nil {
-					t.Errorf("failed to clean up temp folder  %q", tmpDir)
-				}
-			}()
+			tmpDir := t.TempDir()
 
 			test.cfg.SetPath(filepath.Join(tmpDir, "kubeconfig"))
 			if len(test.existingCfg) != 0 {
@@ -245,7 +300,7 @@ func TestUpdate(t *testing.T) {
 					t.Fatalf("WriteFile: %v", err)
 				}
 			}
-			err = Update(test.cfg)
+			err := Update(test.cfg)
 			if err != nil && !test.err {
 				t.Errorf("Got unexpected error: %v", err)
 			}
@@ -401,7 +456,7 @@ func TestUpdateIP(t *testing.T) {
 		},
 	}
 
-	os.Setenv(localpath.MinikubeHome, "/home/la-croix")
+	t.Setenv(localpath.MinikubeHome, "/home/la-croix")
 
 	for _, test := range tests {
 		test := test
@@ -436,6 +491,26 @@ func TestUpdateIP(t *testing.T) {
 	}
 }
 
+func TestMissingContext(t *testing.T) {
+	t.Setenv(localpath.MinikubeHome, "/home/la-croix")
+	configFilename := tempFile(t, kubeConfigMissingContext)
+	defer os.Remove(configFilename)
+	if _, err := UpdateEndpoint("minikube", "192.168.10.100", 8080, configFilename, nil); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := readOrNew(configFilename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := decode(kubeConfigFixedContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !configEquals(actual, expected) {
+		t.Fatalf("configs did not match: Actual:\n%+v\n Expected:\n%+v", actual, expected)
+	}
+}
+
 func TestEmptyConfig(t *testing.T) {
 	tmp := tempFile(t, []byte{})
 	defer os.Remove(tmp)
@@ -459,16 +534,7 @@ func TestEmptyConfig(t *testing.T) {
 }
 
 func TestNewConfig(t *testing.T) {
-	dir, err := os.MkdirTemp("", ".kube")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		err := os.RemoveAll(dir)
-		if err != nil {
-			t.Errorf("Failed to remove dir %q: %v", dir, err)
-		}
-	}()
+	dir := t.TempDir()
 
 	// setup minikube config
 	expected := api.NewConfig()
@@ -476,8 +542,7 @@ func TestNewConfig(t *testing.T) {
 
 	// write actual
 	filename := filepath.Join(dir, "config")
-	err = writeToFile(expected, filename)
-	if err != nil {
+	if err := writeToFile(expected, filename); err != nil {
 		t.Fatal(err)
 	}
 
@@ -730,7 +795,7 @@ func TestGetKubeConfigPath(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		os.Setenv(clientcmd.RecommendedConfigPathEnvVar, test.input)
+		t.Setenv(clientcmd.RecommendedConfigPathEnvVar, test.input)
 		if result := PathFromEnv(); result != os.ExpandEnv(test.want) {
 			t.Errorf("Expected first split chunk, got: %s", result)
 		}

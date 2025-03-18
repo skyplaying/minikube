@@ -30,6 +30,7 @@ import (
 	"github.com/spf13/viper"
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/minikube/config"
+	"k8s.io/minikube/pkg/minikube/detect"
 	"k8s.io/minikube/pkg/minikube/localpath"
 	"k8s.io/minikube/pkg/minikube/out"
 	"k8s.io/minikube/pkg/minikube/style"
@@ -118,6 +119,12 @@ func shouldCheckURLVersion(filePath string) bool {
 	if !viper.GetBool(config.WantUpdateNotification) {
 		return false
 	}
+	if !viper.GetBool("interactive") {
+		return false
+	}
+	if out.JSON {
+		return false
+	}
 	lastUpdateTime := timeFromFileIfExists(filePath)
 	return time.Since(lastUpdateTime).Hours() >= viper.GetFloat64(config.ReminderWaitPeriodInHours)
 }
@@ -130,14 +137,33 @@ func shouldCheckURLBetaVersion(filePath string) bool {
 	return shouldCheckURLVersion(filePath)
 }
 
-// Release represents a release
-type Release struct {
-	Name      string
-	Checksums map[string]string
+type operatingSystems struct {
+	Darwin  string `json:"darwin,omitempty"`
+	Linux   string `json:"linux,omitempty"`
+	Windows string `json:"windows,omitempty"`
 }
 
-// Releases represents several release
-type Releases []Release
+type checksums struct {
+	AMD64   *operatingSystems `json:"amd64,omitempty"`
+	ARM     *operatingSystems `json:"arm,omitempty"`
+	ARM64   *operatingSystems `json:"arm64,omitempty"`
+	PPC64LE *operatingSystems `json:"ppc64le,omitempty"`
+	S390X   *operatingSystems `json:"s390x,omitempty"`
+	operatingSystems
+}
+
+type Release struct {
+	Checksums checksums `json:"checksums"`
+	Name      string    `json:"name"`
+}
+
+type Releases struct {
+	Releases []Release
+}
+
+func (r *Releases) UnmarshalJSON(p []byte) error {
+	return json.Unmarshal(p, &r.Releases)
+}
 
 func getJSON(url string, target *Releases) error {
 	client := &http.Client{}
@@ -146,8 +172,8 @@ func getJSON(url string, target *Releases) error {
 	if err != nil {
 		return errors.Wrap(err, "error creating new http request")
 	}
-	ua := fmt.Sprintf("Minikube/%s Minikube-OS/%s",
-		version.GetVersion(), runtime.GOOS)
+	ua := fmt.Sprintf("Minikube/%s Minikube-OS/%s Minikube-Arch/%s Minikube-Plaform/%s Minikube-Cloud/%s",
+		version.GetVersion(), runtime.GOOS, runtime.GOARCH, platform(), cloud())
 
 	req.Header.Set("User-Agent", ua)
 
@@ -160,12 +186,32 @@ func getJSON(url string, target *Releases) error {
 	return json.NewDecoder(resp.Body).Decode(target)
 }
 
+func platform() string {
+	if detect.GithubActionRunner() {
+		return "GitHub Action"
+	}
+	if detect.IsCloudShell() {
+		return "Cloud Shell"
+	}
+	if detect.IsMicrosoftWSL() {
+		return "WSL"
+	}
+	return "none"
+}
+
+func cloud() string {
+	if detect.IsOnGCE() {
+		return "GCE"
+	}
+	return "none"
+}
+
 var latestVersionFromURL = func(url string) (semver.Version, error) {
 	r, err := AllVersionsFromURL(url)
 	if err != nil {
 		return semver.Version{}, err
 	}
-	return semver.Make(strings.TrimPrefix(r[0].Name, version.VersionPrefix))
+	return semver.Make(strings.TrimPrefix(r.Releases[0].Name, version.VersionPrefix))
 }
 
 // AllVersionsFromURL get all versions from a JSON URL
@@ -175,7 +221,7 @@ func AllVersionsFromURL(url string) (Releases, error) {
 	if err := getJSON(url, &releases); err != nil {
 		return releases, errors.Wrap(err, "Error getting json from minikube version url")
 	}
-	if len(releases) == 0 {
+	if len(releases.Releases) == 0 {
 		return releases, errors.Errorf("There were no json releases at the url specified: %s", url)
 	}
 	return releases, nil

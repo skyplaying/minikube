@@ -1,5 +1,4 @@
 //go:build darwin
-// +build darwin
 
 /*
 Copyright 2016 The Kubernetes Authors All rights reserved.
@@ -68,7 +67,7 @@ type Driver struct {
 }
 
 // NewDriver creates a new driver for a host
-func NewDriver(hostName, storePath string) *Driver {
+func NewDriver(_, _ string) *Driver {
 	return &Driver{
 		BaseDriver: &drivers.BaseDriver{
 			SSHUser: "docker",
@@ -262,8 +261,6 @@ func (d *Driver) Start() error {
 		return errors.Wrap(err, "getting MAC address from UUID")
 	}
 
-	// Need to strip 0's
-	mac = trimMacAddress(mac)
 	log.Debugf("Generated MAC %s", mac)
 
 	log.Debugf("Starting with cmdline: %s", d.Cmdline)
@@ -289,7 +286,7 @@ func (d *Driver) setupIP(mac string) error {
 			return fmt.Errorf("hyperkit crashed! command line:\n  hyperkit %s", d.Cmdline)
 		}
 
-		d.IPAddress, err = GetIPAddressByMACAddress(mac)
+		d.IPAddress, err = pkgdrivers.GetIPAddressByMACAddress(mac)
 		if err != nil {
 			return &tempError{err}
 		}
@@ -428,7 +425,7 @@ func (d *Driver) extractKernel(isoPath string) error {
 		{"/boot/initrd", "initrd"},
 	} {
 		fullDestPath := d.ResolveStorePath(f.destPath)
-		if err := ExtractFile(isoPath, f.pathInIso, fullDestPath); err != nil {
+		if err := pkgdrivers.ExtractFile(isoPath, f.pathInIso, fullDestPath); err != nil {
 			return err
 		}
 	}

@@ -30,19 +30,19 @@ func TestSupportedDrivers(t *testing.T) {
 	got := SupportedDrivers()
 	found := false
 	for _, s := range SupportedDrivers() {
-		if s == VirtualBox {
+		if s == SSH {
 			found = true
 		}
 	}
 
 	if found == false {
-		t.Errorf("%s not in supported drivers: %v", VirtualBox, got)
+		t.Errorf("%s not in supported drivers: %v", SSH, got)
 	}
 }
 
 func TestSupported(t *testing.T) {
-	if !Supported(VirtualBox) {
-		t.Errorf("Supported(%s) is false", VirtualBox)
+	if !Supported(SSH) {
+		t.Errorf("Supported(%s) is false", SSH)
 	}
 	if Supported("yabba?") {
 		t.Errorf("Supported(yabba?) is true")
@@ -60,18 +60,20 @@ func TestBareMetal(t *testing.T) {
 
 func TestMachineType(t *testing.T) {
 	types := map[string]string{
-		Podman:       "container",
-		Docker:       "container",
-		Mock:         "bare metal machine",
-		None:         "bare metal machine",
-		SSH:          "bare metal machine",
-		KVM2:         "VM",
-		VirtualBox:   "VM",
-		HyperKit:     "VM",
-		VMware:       "VM",
-		VMwareFusion: "VM",
-		HyperV:       "VM",
-		Parallels:    "VM",
+		Podman:     "container",
+		Docker:     "container",
+		Mock:       "bare metal machine",
+		None:       "bare metal machine",
+		SSH:        "bare metal machine",
+		KVM2:       "VM",
+		QEMU2:      "VM",
+		QEMU:       "VM",
+		VFKit:      "VM",
+		VirtualBox: "VM",
+		HyperKit:   "VM",
+		VMware:     "VM",
+		HyperV:     "VM",
+		Parallels:  "VM",
 	}
 
 	drivers := SupportedDrivers()
@@ -85,7 +87,7 @@ func TestMachineType(t *testing.T) {
 }
 
 func TestFlagDefaults(t *testing.T) {
-	expected := FlagHints{CacheImages: true, ExtraOptions: []string{"kubelet.housekeeping-interval=5m"}}
+	expected := FlagHints{CacheImages: true}
 	if diff := cmp.Diff(FlagDefaults(VirtualBox), expected); diff != "" {
 		t.Errorf("defaults mismatch (-want +got):\n%s", diff)
 	}
@@ -98,7 +100,7 @@ func TestFlagDefaults(t *testing.T) {
 
 	expected = FlagHints{
 		CacheImages:  false,
-		ExtraOptions: []string{"kubelet.housekeeping-interval=5m", fmt.Sprintf("kubelet.resolv-conf=%s", tf.Name())},
+		ExtraOptions: []string{fmt.Sprintf("kubelet.resolv-conf=%s", tf.Name())},
 	}
 	systemdResolvConf = tf.Name()
 	if diff := cmp.Diff(FlagDefaults(None), expected); diff != "" {

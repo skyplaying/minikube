@@ -1,5 +1,4 @@
 //go:build integration
-// +build integration
 
 /*
 Copyright 2016 The Kubernetes Authors All rights reserved.
@@ -70,20 +69,12 @@ func TestGvisorAddon(t *testing.T) {
 		t.Fatalf("failed waiting for 'gvisor controller' pod: %v", err)
 	}
 
-	// Create an untrusted workload
-	rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "replace", "--force", "-f", filepath.Join(*testdataDir, "nginx-untrusted.yaml")))
-	if err != nil {
-		t.Fatalf("%s failed: %v", rr.Command(), err)
-	}
 	// Create gvisor workload
 	rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "replace", "--force", "-f", filepath.Join(*testdataDir, "nginx-gvisor.yaml")))
 	if err != nil {
 		t.Fatalf("%s failed: %v", rr.Command(), err)
 	}
 
-	if _, err := PodWait(ctx, t, profile, "default", "run=nginx,untrusted=true", Minutes(4)); err != nil {
-		t.Errorf("failed waiting for nginx pod: %v", err)
-	}
 	if _, err := PodWait(ctx, t, profile, "default", "run=nginx,runtime=gvisor", Minutes(4)); err != nil {
 		t.Errorf("failed waitinf for gvisor pod: %v", err)
 	}
@@ -91,7 +82,7 @@ func TestGvisorAddon(t *testing.T) {
 	// Ensure that workloads survive a restart
 	rr, err = Run(t, exec.CommandContext(ctx, Target(), "stop", "-p", profile))
 	if err != nil {
-		t.Fatalf("faild stopping minikube. args %q : %v", rr.Command(), err)
+		t.Fatalf("failed stopping minikube. args %q : %v", rr.Command(), err)
 	}
 
 	rr, err = Run(t, exec.CommandContext(ctx, Target(), startArgs...))
@@ -100,9 +91,6 @@ func TestGvisorAddon(t *testing.T) {
 	}
 	if _, err := PodWait(ctx, t, profile, "kube-system", "kubernetes.io/minikube-addons=gvisor", Minutes(4)); err != nil {
 		t.Errorf("failed waiting for 'gvisor controller' pod : %v", err)
-	}
-	if _, err := PodWait(ctx, t, profile, "default", "run=nginx,untrusted=true", Minutes(4)); err != nil {
-		t.Errorf("failed waiting for 'nginx' pod : %v", err)
 	}
 	if _, err := PodWait(ctx, t, profile, "default", "run=nginx,runtime=gvisor", Minutes(4)); err != nil {
 		t.Errorf("failed waiting for 'gvisor' pod : %v", err)

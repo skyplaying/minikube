@@ -47,9 +47,9 @@ import (
 var (
 	dashboardURLMode     bool
 	dashboardExposedPort int
-	// Matches: 127.0.0.1:8001
+	// Matches: "127.0.0.1:8001" or "127.0.0.1 40012" etc.
 	// TODO(tstromberg): Get kubectl to implement a stable supported output format.
-	hostPortRe = regexp.MustCompile(`127.0.0.1:\d{4,}`)
+	hostPortRe = regexp.MustCompile(`127\.0\.0\.1(:| )\d{4,}`)
 )
 
 // dashboardCmd represents the dashboard command
@@ -57,7 +57,7 @@ var dashboardCmd = &cobra.Command{
 	Use:   "dashboard",
 	Short: "Access the Kubernetes dashboard running within the minikube cluster",
 	Long:  `Access the Kubernetes dashboard running within the minikube cluster`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, _ []string) {
 		cname := ClusterFlagValue()
 		co := mustload.Healthy(cname)
 
@@ -180,6 +180,10 @@ func kubectlProxy(kubectlVersion string, binaryURL string, contextName string, p
 func readByteWithTimeout(r io.ByteReader, timeout time.Duration) (byte, bool, error) {
 	bc := make(chan byte, 1)
 	ec := make(chan error, 1)
+	defer func() {
+		close(bc)
+		close(ec)
+	}()
 	go func() {
 		b, err := r.ReadByte()
 		if err != nil {
@@ -187,8 +191,6 @@ func readByteWithTimeout(r io.ByteReader, timeout time.Duration) (byte, bool, er
 		} else {
 			bc <- b
 		}
-		close(bc)
-		close(ec)
 	}()
 	select {
 	case b := <-bc:

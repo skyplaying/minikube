@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"runtime/debug"
@@ -31,6 +32,7 @@ import (
 	"github.com/spf13/viper"
 	"k8s.io/minikube/pkg/minikube/constants"
 	"k8s.io/minikube/pkg/minikube/download"
+	"k8s.io/minikube/pkg/util"
 )
 
 const (
@@ -39,14 +41,17 @@ const (
 )
 
 var (
-	dockerStorageDriver = "overlay2"
-	podmanStorageDriver = "overlay"
-	containerRuntimes   = []string{"docker", "containerd", "cri-o"}
-	k8sVersions         []string
-	k8sVersion          = flag.String("kubernetes-version", "", "desired Kubernetes version, for example `v1.17.2`")
-	noUpload            = flag.Bool("no-upload", false, "Do not upload tarballs to GCS")
-	force               = flag.Bool("force", false, "Generate the preload tarball even if it's already exists")
-	limit               = flag.Int("limit", 0, "Limit the number of tarballs to generate")
+	dockerStorageDriver   = "overlay2"
+	containerdSnapshotter = "overlayfs"
+	podmanStorageDriver   = "overlay"
+	containerRuntimes     = []string{"docker", "containerd", "cri-o"}
+	k8sVersions           []string
+	k8sVersion            = flag.String("kubernetes-version", "", "desired Kubernetes version, for example `v1.17.2`")
+	noUpload              = flag.Bool("no-upload", false, "Do not upload tarballs to GCS")
+	force                 = flag.Bool("force", false, "Generate the preload tarball even if it's already exists")
+	limit                 = flag.Int("limit", 0, "Limit the number of tarballs to generate")
+	armUpload             = flag.Bool("arm-upload", false, "Upload the arm64 preload tarballs to GCS")
+	armPreloadsDir        = flag.String("arm-preloads-dir", "artifacts", "Directory containing the arm64 preload tarballs")
 )
 
 type preloadCfg struct {
@@ -60,6 +65,13 @@ func (p preloadCfg) String() string {
 
 func main() {
 	flag.Parse()
+
+	if *armUpload {
+		if err := uploadArmTarballs(*armPreloadsDir); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 
 	// used by pkg/minikube/download.PreloadExists()
 	viper.Set("preload", "true")
@@ -119,11 +131,12 @@ func collectK8sVers() ([]string, error) {
 		}
 		k8sVersions = recent
 	}
-	return append([]string{
+	versions := append([]string{
 		constants.DefaultKubernetesVersion,
 		constants.NewestKubernetesVersion,
 		constants.OldestKubernetesVersion,
-	}, k8sVersions...), nil
+	}, k8sVersions...)
+	return util.RemoveDuplicateStrings(versions), nil
 }
 
 func makePreload(cfg preloadCfg) error {
@@ -146,7 +159,7 @@ func makePreload(cfg preloadCfg) error {
 		fmt.Printf("skip upload of %q\n", tf)
 		return nil
 	}
-	if err := uploadTarball(tf); err != nil {
+	if err := uploadTarball(tf, kv); err != nil {
 		return errors.Wrap(err, fmt.Sprintf("uploading tarball for k8s version %s with %s", kv, cr))
 	}
 	return nil
@@ -163,6 +176,27 @@ var verifyDockerStorage = func() error {
 	driver := strings.Trim(string(output), " \n")
 	if driver != dockerStorageDriver {
 		return fmt.Errorf("docker storage driver %s does not match requested %s", driver, dockerStorageDriver)
+	}
+	return nil
+}
+
+var verifyContainerdStorage = func() error {
+	cmd := exec.Command("docker", "exec", profile, "sudo", "containerd", "config", "dump")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("%v: %v:\n%s", cmd.Args, err, stderr.String())
+	}
+	var driver string
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.Contains(line, "snapshotter = ") {
+			driver = strings.Split(line, " = ")[1]
+			driver = strings.Trim(driver, "\"")
+		}
+	}
+	if driver != containerdSnapshotter {
+		return fmt.Errorf("containerd snapshotter %s does not match requested %s", driver, containerdSnapshotter)
 	}
 	return nil
 }

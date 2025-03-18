@@ -19,11 +19,11 @@ package util
 import (
 	"os"
 	"os/user"
-	"runtime"
 	"syscall"
 	"testing"
 
 	"github.com/blang/semver/v4"
+	"github.com/google/go-cmp/cmp"
 )
 
 func TestGetBinaryDownloadURL(t *testing.T) {
@@ -38,7 +38,7 @@ func TestGetBinaryDownloadURL(t *testing.T) {
 	}
 
 	for _, tt := range testData {
-		url := GetBinaryDownloadURL(tt.version, tt.platform, runtime.GOARCH)
+		url := GetBinaryDownloadURL(tt.version, tt.platform, "amd64")
 		if url != tt.expectedURL {
 			t.Fatalf("Expected '%s' but got '%s'", tt.expectedURL, url)
 		}
@@ -80,20 +80,10 @@ func TestParseKubernetesVersion(t *testing.T) {
 }
 
 func TestChownR(t *testing.T) {
-	testDir, err := os.MkdirTemp(os.TempDir(), "")
-	if nil != err {
+	testDir := t.TempDir()
+	if _, err := os.Create(testDir + "/TestChownR"); err != nil {
 		return
 	}
-	_, err = os.Create(testDir + "/TestChownR")
-	if nil != err {
-		return
-	}
-	defer func() { // clean up tempdir
-		err := os.RemoveAll(testDir)
-		if err != nil {
-			t.Errorf("failed to clean up temp folder  %q", testDir)
-		}
-	}()
 
 	cases := []struct {
 		name          string
@@ -122,7 +112,7 @@ func TestChownR(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err = ChownR(testDir+"/TestChownR", c.uid, c.gid)
+			err := ChownR(testDir+"/TestChownR", c.uid, c.gid)
 			fileInfo, _ := os.Stat(testDir + "/TestChownR")
 			fileSys := fileInfo.Sys()
 			if (nil != err) != c.expectedError || ((false == c.expectedError) && (fileSys.(*syscall.Stat_t).Gid != uint32(c.gid) || fileSys.(*syscall.Stat_t).Uid != uint32(c.uid))) {
@@ -133,27 +123,13 @@ func TestChownR(t *testing.T) {
 }
 
 func TestMaybeChownDirRecursiveToMinikubeUser(t *testing.T) {
-	testDir, err := os.MkdirTemp(os.TempDir(), "")
-	if nil != err {
+	testDir := t.TempDir()
+	if _, err := os.Create(testDir + "/TestChownR"); nil != err {
 		return
 	}
-	_, err = os.Create(testDir + "/TestChownR")
-	if nil != err {
-		return
-	}
-
-	defer func() { // clean up tempdir
-		err := os.RemoveAll(testDir)
-		if err != nil {
-			t.Errorf("failed to clean up temp folder  %q", testDir)
-		}
-	}()
 
 	if os.Getenv("CHANGE_MINIKUBE_NONE_USER") == "" {
-		err = os.Setenv("CHANGE_MINIKUBE_NONE_USER", "1")
-		if nil != err {
-			t.Error("failed to set env: CHANGE_MINIKUBE_NONE_USER")
-		}
+		t.Setenv("CHANGE_MINIKUBE_NONE_USER", "1")
 	}
 
 	if os.Getenv("SUDO_USER") == "" {
@@ -161,11 +137,7 @@ func TestMaybeChownDirRecursiveToMinikubeUser(t *testing.T) {
 		if nil != err {
 			t.Error("fail to get user")
 		}
-		os.Setenv("SUDO_USER", user.Username)
-		err = os.Setenv("SUDO_USER", user.Username)
-		if nil != err {
-			t.Error("failed to set env: SUDO_USER")
-		}
+		t.Setenv("SUDO_USER", user.Username)
 	}
 
 	cases := []struct {
@@ -179,7 +151,7 @@ func TestMaybeChownDirRecursiveToMinikubeUser(t *testing.T) {
 			expectedError: false,
 		},
 		{
-			name:          "invaild dir",
+			name:          "invalid dir",
 			dir:           "./utils_test",
 			expectedError: true,
 		},
@@ -187,10 +159,154 @@ func TestMaybeChownDirRecursiveToMinikubeUser(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err = MaybeChownDirRecursiveToMinikubeUser(c.dir)
+			err := MaybeChownDirRecursiveToMinikubeUser(c.dir)
 			if (nil != err) != c.expectedError {
 				t.Errorf("expectedError: %v, got: %v", c.expectedError, err)
 			}
 		})
+	}
+}
+
+func TestRemoveDuplicateStrings(t *testing.T) {
+	testCases := []struct {
+		desc  string
+		slice []string
+		want  []string
+	}{
+		{
+			desc:  "NoDuplicates",
+			slice: []string{"alpha", "bravo", "charlie"},
+			want:  []string{"alpha", "bravo", "charlie"},
+		},
+		{
+			desc:  "AdjacentDuplicates",
+			slice: []string{"alpha", "bravo", "bravo", "charlie"},
+			want:  []string{"alpha", "bravo", "charlie"},
+		},
+		{
+			desc:  "NonAdjacentDuplicates",
+			slice: []string{"alpha", "bravo", "alpha", "charlie"},
+			want:  []string{"alpha", "bravo", "charlie"},
+		},
+		{
+			desc:  "MultipleDuplicates",
+			slice: []string{"alpha", "bravo", "alpha", "alpha", "charlie", "charlie", "alpha", "bravo"},
+			want:  []string{"alpha", "bravo", "charlie"},
+		},
+		{
+			desc:  "UnsortedDuplicates",
+			slice: []string{"charlie", "bravo", "alpha", "bravo"},
+			want:  []string{"charlie", "bravo", "alpha"},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.desc, func(t *testing.T) {
+			got := RemoveDuplicateStrings(tc.slice)
+			if diff := cmp.Diff(got, tc.want); diff != "" {
+				t.Errorf("RemoveDuplicateStrings(%v) = %v, want: %v", tc.slice, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMaskProxyPassword(t *testing.T) {
+	type dockerOptTest struct {
+		input  string
+		output string
+	}
+	var tests = []dockerOptTest{
+		{
+			input:  "cats",
+			output: "cats",
+		},
+		{
+			input:  "myDockerOption=value",
+			output: "myDockerOption=value",
+		},
+		{
+			input:  "http://minikube.sigs.k8s.io",
+			output: "http://minikube.sigs.k8s.io",
+		},
+		{
+			input:  "http://jdoe@minikube.sigs.k8s.io:8080",
+			output: "http://jdoe@minikube.sigs.k8s.io:8080",
+		},
+		{
+			input:  "https://mary:iam$Fake!password@minikube.sigs.k8s.io:8080",
+			output: "https://mary:*****@minikube.sigs.k8s.io:8080",
+		},
+		{
+			input:  "http://jdoe:%n0tRe@al:Password!@minikube.sigs.k8s.io:8080",
+			output: "http://jdoe:*****@minikube.sigs.k8s.io:8080",
+		},
+		{
+			input:  "http://jo@han:n0tRe@al:&Password!@minikube.sigs.k8s.io:8080",
+			output: "http://jo@han:*****@minikube.sigs.k8s.io:8080",
+		},
+		{
+			input:  "http://k@r3n!:an0th3erF@akeP@55word@minikube.sigs.k8s.io",
+			output: "http://k@r3n!:*****@minikube.sigs.k8s.io",
+		},
+		{
+			input:  "https://fr@ank5t3in:an0th3erF@akeP@55word@minikube.sigs.k8s.io",
+			output: "https://fr@ank5t3in:*****@minikube.sigs.k8s.io",
+		},
+	}
+	for _, test := range tests {
+		got := MaskProxyPassword(test.input)
+		if got != test.output {
+			t.Errorf("MaskProxyPassword(\"%v\"): got %v, expected %v", test.input, got, test.output)
+		}
+	}
+}
+
+func TestMaskProxyPasswordWithKey(t *testing.T) {
+	type dockerOptTest struct {
+		input  string
+		output string
+	}
+	var tests = []dockerOptTest{
+		{
+			input:  "cats",
+			output: "cats",
+		},
+		{
+			input:  "myDockerOption=value",
+			output: "myDockerOption=value",
+		},
+		{
+			input:  "http_proxy=http://minikube.sigs.k8s.io",
+			output: "HTTP_PROXY=http://minikube.sigs.k8s.io",
+		},
+		{
+			input:  "https_proxy=http://jdoe@minikube.sigs.k8s.io:8080",
+			output: "HTTPS_PROXY=http://jdoe@minikube.sigs.k8s.io:8080",
+		},
+		{
+			input:  "https_proxy=https://mary:iam$Fake!password@minikube.sigs.k8s.io:8080",
+			output: "HTTPS_PROXY=https://mary:*****@minikube.sigs.k8s.io:8080",
+		},
+		{
+			input:  "http_proxy=http://jdoe:%n0tRe@al:Password!@minikube.sigs.k8s.io:8080",
+			output: "HTTP_PROXY=http://jdoe:*****@minikube.sigs.k8s.io:8080",
+		},
+		{
+			input:  "http_proxy=http://jo@han:n0tRe@al:&Password!@minikube.sigs.k8s.io:8080",
+			output: "HTTP_PROXY=http://jo@han:*****@minikube.sigs.k8s.io:8080",
+		},
+		{
+			input:  "http_proxy=http://k@r3n!:an0th3erF@akeP@55word@minikube.sigs.k8s.io",
+			output: "HTTP_PROXY=http://k@r3n!:*****@minikube.sigs.k8s.io",
+		},
+		{
+			input:  "https_proxy=https://fr@ank5t3in:an0th3erF@akeP@55word@minikube.sigs.k8s.io",
+			output: "HTTPS_PROXY=https://fr@ank5t3in:*****@minikube.sigs.k8s.io",
+		},
+	}
+	for _, test := range tests {
+		got := MaskProxyPasswordWithKey(test.input)
+		if got != test.output {
+			t.Errorf("MaskProxyPasswordWithKey(\"%v\"): got %v, expected %v", test.input, got, test.output)
+		}
 	}
 }

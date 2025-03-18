@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/docker/machine/libmachine/mcnerror"
@@ -34,6 +35,7 @@ import (
 	"github.com/spf13/viper"
 	"k8s.io/klog/v2"
 	cmdcfg "k8s.io/minikube/cmd/minikube/cmd/config"
+	"k8s.io/minikube/pkg/drivers/kic"
 	"k8s.io/minikube/pkg/drivers/kic/oci"
 	"k8s.io/minikube/pkg/minikube/cluster"
 	"k8s.io/minikube/pkg/minikube/config"
@@ -49,6 +51,7 @@ import (
 	"k8s.io/minikube/pkg/minikube/out"
 	"k8s.io/minikube/pkg/minikube/out/register"
 	"k8s.io/minikube/pkg/minikube/reason"
+	"k8s.io/minikube/pkg/minikube/sshagent"
 	"k8s.io/minikube/pkg/minikube/style"
 )
 
@@ -91,6 +94,9 @@ var hostAndDirsDeleter = func(api libmachine.API, cc *config.ClusterConfig, prof
 	if err := killMountProcess(); err != nil {
 		out.FailureT("Failed to kill mount process: {{.error}}", out.V{"error": err})
 	}
+	if err := sshagent.Stop(profileName); err != nil && !config.IsNotExist(err) {
+		out.FailureT("Failed to stop ssh-agent process: {{.error}}", out.V{"error": err})
+	}
 
 	deleteHosts(api, cc)
 
@@ -108,6 +114,7 @@ var hostAndDirsDeleter = func(api libmachine.API, cc *config.ClusterConfig, prof
 func init() {
 	deleteCmd.Flags().BoolVar(&deleteAll, "all", false, "Set flag to delete all profiles")
 	deleteCmd.Flags().BoolVar(&purge, "purge", false, "Set this flag to delete the '.minikube' folder from your user directory.")
+	deleteCmd.Flags().StringVarP(&outputFormat, "output", "o", "text", "Format to print stdout in. Options include: [text,json]")
 
 	if err := viper.BindPFlags(deleteCmd.Flags()); err != nil {
 		exit.Error(reason.InternalBindFlags, "unable to bind flags", err)
@@ -145,12 +152,66 @@ func deleteContainersAndVolumes(ctx context.Context, ociBin string) {
 	}
 }
 
+// kicbaseImages returns kicbase images
+func kicbaseImages(ctx context.Context, ociBin string) ([]string, error) {
+	if _, err := exec.LookPath(ociBin); err != nil {
+		return nil, nil
+	}
+
+	// create list of possible kicbase images
+	kicImages := []string{kic.BaseImage}
+	kicImages = append(kicImages, kic.FallbackImages...)
+
+	kicImagesRepo := []string{}
+	for _, img := range kicImages {
+		kicImagesRepo = append(kicImagesRepo, strings.Split(img, ":")[0])
+	}
+
+	allImages, err := oci.ListImagesRepository(ctx, ociBin)
+	if err != nil {
+		return nil, err
+	}
+
+	var result []string
+	for _, img := range allImages {
+		for _, kicImg := range kicImagesRepo {
+			if kicImg == strings.Split(img, ":")[0] {
+				result = append(result, img)
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
+// printDeleteImagesCommand prints command which remove images
+func printDeleteImagesCommand(ociBin string, imageNames []string) {
+	if _, err := exec.LookPath(ociBin); err != nil {
+		return
+	}
+
+	if len(imageNames) > 0 {
+		out.Styled(style.Command, `{{.ociBin}} rmi {{.images}}`, out.V{"ociBin": ociBin, "images": strings.Join(imageNames, " ")})
+	}
+}
+
+// printDeleteImageInfo prints info about removing kicbase images
+func printDeleteImageInfo(dockerImageNames, podmanImageNames []string) {
+	if len(dockerImageNames) == 0 && len(podmanImageNames) == 0 {
+		return
+	}
+
+	out.Styled(style.Notice, `Kicbase images have not been deleted. To delete images run:`)
+	printDeleteImagesCommand(oci.Docker, dockerImageNames)
+	printDeleteImagesCommand(oci.Podman, podmanImageNames)
+}
+
 // runDelete handles the executes the flow of "minikube delete"
-func runDelete(cmd *cobra.Command, args []string) {
+func runDelete(_ *cobra.Command, args []string) {
 	if len(args) > 0 {
 		exit.Message(reason.Usage, "Usage: minikube delete")
 	}
-	// register.SetEventLogPath(localpath.EventLog(ClusterFlagValue()))
+	out.SetJSON(outputFormat == "json")
 	register.Reg.SetStep(register.Deleting)
 	download.CleanUpOlderPreloads()
 	validProfiles, invalidProfiles, err := config.ListProfiles()
@@ -213,6 +274,16 @@ func runDelete(cmd *cobra.Command, args []string) {
 	// If the purge flag is set, go ahead and delete the .minikube directory.
 	if purge {
 		purgeMinikubeDirectory()
+
+		dockerImageNames, err := kicbaseImages(delCtx, oci.Docker)
+		if err != nil {
+			klog.Warningf("error fetching docker images: %v", err)
+		}
+		podmanImageNames, err := kicbaseImages(delCtx, oci.Podman)
+		if err != nil {
+			klog.Warningf("error fetching podman images: %v", err)
+		}
+		printDeleteImageInfo(dockerImageNames, podmanImageNames)
 	}
 }
 
@@ -221,6 +292,7 @@ func purgeMinikubeDirectory() {
 	if err := os.RemoveAll(localpath.MiniPath()); err != nil {
 		exit.Error(reason.HostPurge, "unable to delete minikube config folder", err)
 	}
+	register.Reg.SetStep(register.Purging)
 	out.Step(style.Deleted, "Successfully purged minikube directory located at - [{{.minikubeDirectory}}]", out.V{"minikubeDirectory": localpath.MiniPath()})
 }
 
@@ -266,7 +338,7 @@ func deleteProfile(ctx context.Context, profile *config.Profile) error {
 			if err := unpauseIfNeeded(profile); err != nil {
 				klog.Warningf("failed to unpause %s : %v", profile.Name, err)
 			}
-			out.Step(style.DeletingHost, `Deleting "{{.profile_name}}" in {{.driver_name}} ...`, out.V{"profile_name": profile.Name, "driver_name": profile.Config.Driver})
+			out.Styled(style.DeletingHost, `Deleting "{{.profile_name}}" in {{.driver_name}} ...`, out.V{"profile_name": profile.Name, "driver_name": profile.Config.Driver})
 			for _, n := range profile.Config.Nodes {
 				machineName := config.MachineName(*profile.Config, n)
 				delete.PossibleLeftOvers(ctx, machineName, profile.Config.Driver)
@@ -305,7 +377,7 @@ func deleteProfile(ctx context.Context, profile *config.Profile) error {
 		return err
 	}
 
-	out.Step(style.Deleted, `Removed all traces of the "{{.name}}" cluster.`, out.V{"name": profile.Name})
+	out.Styled(style.Deleted, `Removed all traces of the "{{.name}}" cluster.`, out.V{"name": profile.Name})
 	return nil
 }
 
@@ -335,7 +407,7 @@ func unpauseIfNeeded(profile *config.Profile) error {
 
 	cr, err := cruntime.New(cruntime.Config{Type: crName, Runner: r})
 	if err != nil {
-		exit.Error(reason.InternalNewRuntime, "Failed to create runtime", err)
+		return err
 	}
 
 	paused, err := cluster.CheckIfPaused(cr, nil)
@@ -395,7 +467,7 @@ func deleteContext(machineName string) error {
 }
 
 func deleteInvalidProfile(profile *config.Profile) []error {
-	out.Step(style.DeletingHost, "Trying to delete invalid profile {{.profile}}", out.V{"profile": profile.Name})
+	out.Styled(style.DeletingHost, "Trying to delete invalid profile {{.profile}}", out.V{"profile": profile.Name})
 
 	var errs []error
 	pathToProfile := config.ProfileFolderPath(profile.Name, localpath.MiniPath())
@@ -421,7 +493,7 @@ func profileDeletionErr(cname string, additionalInfo string) error {
 }
 
 func uninstallKubernetes(api libmachine.API, cc config.ClusterConfig, n config.Node, bsName string) error {
-	out.Step(style.Resetting, "Uninstalling Kubernetes {{.kubernetes_version}} using {{.bootstrapper_name}} ...", out.V{"kubernetes_version": cc.KubernetesConfig.KubernetesVersion, "bootstrapper_name": bsName})
+	out.Styled(style.Resetting, "Uninstalling Kubernetes {{.kubernetes_version}} using {{.bootstrapper_name}} ...", out.V{"kubernetes_version": cc.KubernetesConfig.KubernetesVersion, "bootstrapper_name": bsName})
 	host, err := machine.LoadHost(api, config.MachineName(cc, n))
 	if err != nil {
 		return DeletionError{Err: fmt.Errorf("unable to load host: %v", err), Errtype: MissingCluster}
@@ -469,13 +541,15 @@ func handleSingleDeletionError(err error) {
 	if ok {
 		switch deletionError.Errtype {
 		case Fatal:
-			out.FatalT(deletionError.Error())
+			out.ErrT(style.Fatal, "Failed to delete profile(s): {{.error}}", out.V{"error": deletionError.Error()})
+			os.Exit(reason.ExGuestError)
 		case MissingProfile:
 			out.ErrT(style.Sad, deletionError.Error())
 		case MissingCluster:
 			out.ErrT(style.Meh, deletionError.Error())
 		default:
-			out.FatalT(deletionError.Error())
+			out.ErrT(style.Fatal, "Unable to delete profile(s): {{.error}}", out.V{"error": deletionError.Error()})
+			os.Exit(reason.ExGuestError)
 		}
 	} else {
 		exit.Error(reason.GuestDeletion, "Could not process error from failed deletion", err)
@@ -499,7 +573,7 @@ func handleMultipleDeletionErrors(errors []error) {
 func deleteProfileDirectory(profile string) {
 	machineDir := filepath.Join(localpath.MiniPath(), "machines", profile)
 	if _, err := os.Stat(machineDir); err == nil {
-		out.Step(style.DeletingHost, `Removing {{.directory}} ...`, out.V{"directory": machineDir})
+		out.Styled(style.DeletingHost, `Removing {{.directory}} ...`, out.V{"directory": machineDir})
 		err := os.RemoveAll(machineDir)
 		if err != nil {
 			exit.Error(reason.GuestProfileDeletion, "Unable to remove machine directory", err)
@@ -516,9 +590,10 @@ func deleteMachineDirectories(cc *config.ClusterConfig) {
 	}
 }
 
-// killMountProcess kills the mount process, if it is running
+// killMountProcess looks for the legacy path and for profile path for a pidfile,
+// it then tries to kill all the pids listed in the pidfile (one or more)
 func killMountProcess() error {
-	profile := viper.GetString("profile")
+	profile := ClusterFlagValue()
 	paths := []string{
 		localpath.MiniPath(), // legacy mount-process path for backwards compatibility
 		localpath.Profile(profile),
@@ -533,49 +608,120 @@ func killMountProcess() error {
 	return nil
 }
 
+// killProcess takes a path to look for a pidfile (space-separated),
+// it reads the file and converts it to a bunch of pid ints,
+// then it tries to kill each one of them.
+// If no errors were encountered, it cleans the pidfile
 func killProcess(path string) error {
 	pidPath := filepath.Join(path, constants.MountProcessFileName)
 	if _, err := os.Stat(pidPath); os.IsNotExist(err) {
 		return nil
 	}
-
 	klog.Infof("Found %s ...", pidPath)
-	out, err := os.ReadFile(pidPath)
+
+	ppp, err := getPids(pidPath)
 	if err != nil {
-		return errors.Wrap(err, "ReadFile")
-	}
-	klog.Infof("pidfile contents: %s", out)
-	pid, err := strconv.Atoi(string(out))
-	if err != nil {
-		return errors.Wrap(err, "error parsing pid")
-	}
-	// os.FindProcess does not check if pid is running :(
-	entry, err := ps.FindProcess(pid)
-	if err != nil {
-		return errors.Wrap(err, "ps.FindProcess")
-	}
-	if entry == nil {
-		klog.Infof("Stale pid: %d", pid)
-		if err := os.Remove(pidPath); err != nil {
-			return errors.Wrap(err, "Removing stale pid")
-		}
-		return nil
+		return err
 	}
 
-	// We found a process, but it still may not be ours.
-	klog.Infof("Found process %d: %s", pid, entry.Executable())
+	// we're trying to kill each process, without stopping at first error encountered
+	// error handling is done below
+	var errs []error
+	for _, pp := range ppp {
+		err := trySigKillProcess(pp)
+		if err != nil {
+			errs = append(errs, err)
+		}
+
+	}
+
+	if len(errs) == 1 {
+		// if we've encountered only one error, we're returning it:
+		return errs[0]
+	} else if len(errs) != 0 {
+		// if multiple errors were encountered, combine them into a single error
+		out.Styled(style.Failure, "Multiple errors encountered:")
+		for _, e := range errs {
+			out.Errf("%v\n", e)
+		}
+		return errors.New("multiple errors encountered while closing mount processes")
+	}
+
+	// if no errors were encoutered, it's safe to delete pidFile
+	if err := os.Remove(pidPath); err != nil {
+		return errors.Wrap(err, "while closing mount-pids file")
+	}
+
+	return nil
+}
+
+// trySigKillProcess takes a PID as argument and tries to SIGKILL it.
+// It performs an ownership check of the pid,
+// before trying to send a sigkill signal to it
+func trySigKillProcess(pid int) error {
+	itDoes, err := isMinikubeProcess(pid)
+	if err != nil {
+		return err
+	}
+
+	if !itDoes {
+		return fmt.Errorf("stale pid: %d", pid)
+	}
+
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		return errors.Wrap(err, "os.FindProcess")
+		return errors.Wrapf(err, "os.FindProcess: %d", pid)
 	}
 
 	klog.Infof("Killing pid %d ...", pid)
 	if err := proc.Kill(); err != nil {
 		klog.Infof("Kill failed with %v - removing probably stale pid...", err)
-		if err := os.Remove(pidPath); err != nil {
-			return errors.Wrap(err, "Removing likely stale unkillable pid")
-		}
-		return errors.Wrap(err, fmt.Sprintf("Kill(%d/%s)", pid, entry.Executable()))
+		return errors.Wrapf(err, "removing likely stale unkillable pid: %d", pid)
 	}
+
 	return nil
+}
+
+// doesPIDBelongToMinikube tries to find the process with that PID
+// and checks if the executable name contains the string "minikube"
+var isMinikubeProcess = func(pid int) (bool, error) {
+	entry, err := ps.FindProcess(pid)
+	if err != nil {
+		return false, errors.Wrapf(err, "ps.FindProcess for %d", pid)
+	}
+	if entry == nil {
+		klog.Infof("Process not found. pid %d", pid)
+		return false, nil
+	}
+
+	klog.Infof("Found process %d", pid)
+	if !strings.Contains(entry.Executable(), "minikube") {
+		klog.Infof("process %d was not started by minikube", pid)
+		return false, nil
+	}
+
+	return true, nil
+}
+
+// getPids opens the file at PATH and tries to read
+// one or more space separated pids
+func getPids(path string) ([]int, error) {
+	out, err := os.ReadFile(path)
+	if err != nil {
+		return nil, errors.Wrap(err, "ReadFile")
+	}
+	klog.Infof("pidfile contents: %s", out)
+
+	pids := []int{}
+	strPids := strings.Fields(string(out))
+	for _, p := range strPids {
+		intPid, err := strconv.Atoi(p)
+		if err != nil {
+			return nil, err
+		}
+
+		pids = append(pids, intPid)
+	}
+
+	return pids, nil
 }
